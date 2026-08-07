@@ -113,6 +113,8 @@ canvas{display:block;image-rendering:auto}
 .btn.ghost{background:linear-gradient(180deg,rgba(20,21,32,.7),rgba(10,11,18,.8))}
 .btn.danger:hover{background:linear-gradient(180deg,rgba(255,45,111,.28),rgba(60,14,30,.6));border-color:var(--acc2)}
 .btn[disabled]{opacity:.35;pointer-events:none}
+.dsub{display:block;margin-top:3px;font-size:clamp(9px,2.2vw,11px);letter-spacing:.06em;
+  text-transform:none;opacity:.7;font-family:"Segoe UI",system-ui,sans-serif}
 
 .sc-head{display:flex;align-items:center;justify-content:space-between;gap:10px;flex:0 0 auto;position:relative;z-index:3}
 .sc-title{font-size:clamp(16px,4.4vw,30px);color:#fff;
@@ -457,7 +459,7 @@ const CFG = {
   COMBO_HARD_CAP: 5,           // hit N forces a knockdown -> combo must end
   COMBO_SCALE: [1, .86, .72, .58, .45, .34],
   AUTO_CHIP: .12,             // fraction of damage that leaks through auto guard
-  ENDLESS_HEAL: 16,            // % health restored after each Endless win
+  ENDLESS_HEAL: 16,            // % health restored after each Endless win (default)
   ENDLESS_STAGE_EVERY: 3,      // change scenery every N foes
   STORE_KEY: "v01d_beatdown_v1"
 };
@@ -523,7 +525,8 @@ function fmtTime(sec) {
 /* ------------------------------ persistence ----------------------------- */
 const Store = {
   data: {
-    bestTime: 0, bestFoes: 0,
+    bestTime: 0, bestFoes: 0,          // best across all tiers (legacy + summary)
+    bestBy: { easy: { t: 0, f: 0 }, medium: { t: 0, f: 0 }, hard: { t: 0, f: 0 } },
     volMusic: .55, volSfx: .8, volVoice: .8,
     quality: "auto", reduced: false, autoGuard: "player",
     tcVisible: "auto", tcScale: 1, tcOpacity: .8, vibrate: true
@@ -532,6 +535,9 @@ const Store = {
     try {
       const raw = localStorage.getItem(CFG.STORE_KEY);
       if (raw) Object.assign(this.data, JSON.parse(raw));
+      // make sure every tier bucket exists even for older saves
+      const b = this.data.bestBy = this.data.bestBy || {};
+      ["easy", "medium", "hard"].forEach(k => { if (!b[k]) b[k] = { t: 0, f: 0 }; });
     } catch (e) { /* private mode / disabled storage — run with defaults */ }
     return this.data;
   },
@@ -3946,8 +3952,25 @@ AI.prototype.update = function (dt, opp) {
 /* ============================================================================
    GAME — match flow, rounds, camera, HUD, Endless Path, rendering
    ========================================================================== */
+/* how the Endless ramp behaves per chosen difficulty */
+const ENDLESS_TIERS = {
+  easy: {
+    label: "Easy", floor: "easy", stepMed: 4, stepHard: 10, rampOver: 26,
+    hpBase: .58, hpStep: .026, hpCap: 1.2, dmg: .62, dmgRamp: .25, speedRamp: .1, heal: 24
+  },
+  medium: {
+    label: "Medium", floor: "easy", stepMed: 2, stepHard: 6, rampOver: 16,
+    hpBase: .72, hpStep: .035, hpCap: 1.5, dmg: .85, dmgRamp: .35, speedRamp: .18, heal: 16
+  },
+  hard: {
+    label: "Hard", floor: "medium", stepMed: 0, stepHard: 3, rampOver: 10,
+    hpBase: .88, hpStep: .045, hpCap: 1.85, dmg: 1, dmgRamp: .45, speedRamp: .26, heal: 9
+  }
+};
+
 const Game = {
   mode: "menu",          // menu | vs | endless
+  endlessDiff: "medium", foeTier: "easy", foeBoost: 0, newRecord: false,
   phase: "idle",         // intro | fight | ko | roundEnd | travel | over
   p1: null, p2: null, ai: null, aiLevel: "medium",
   camX: 0, camTarget: 0,
@@ -4019,12 +4042,13 @@ const Game = {
     Music.play("fight");
   },
 
-  startEndless(p1i) {
+  startEndless(p1i, diff) {
     this.mode = "endless";
+    this.endlessDiff = ENDLESS_TIERS[diff] ? diff : "medium";
     this.p1 = new Fighter(ROSTER[p1i], 0);
     this.p1.atlas = this.atlasFor(ROSTER[p1i]);
     this.foeIdx = 0; this.survT = 0; this.pathOff = 0;
-    this.best = Store.data.bestTime || 0;
+    this.best = (Store.data.bestBy[this.endlessDiff] || { t: 0 }).t || 0;
     this.stats = { hits: 0, blocks: 0, maxCombo: 0 };
     Stage.load(0);
     this.spawnFoe(true);
@@ -4036,19 +4060,21 @@ const Game = {
     Music.play("endless");
   },
   spawnFoe(first) {
+    const T = ENDLESS_TIERS[this.endlessDiff] || ENDLESS_TIERS.medium;
     const def = makeEnemyDef(this.foeIdx);
     this.foeAtlas = buildAtlas(def, this.foeAtlas ? this.foeAtlas.cv : null);
     this.p2 = new Fighter(def, 1);
     this.p2.atlas = this.foeAtlas;
-    const boost = clamp(this.foeIdx / 16, 0, 1);
-    const lvl = this.foeIdx < 2 ? "easy" : this.foeIdx < 6 ? "medium" : "hard";
+    const boost = clamp(this.foeIdx / T.rampOver, 0, 1);
+    let lvl = this.foeIdx < T.stepMed ? "easy" : this.foeIdx < T.stepHard ? "medium" : "hard";
+    if (T.floor === "medium" && lvl === "easy") lvl = "medium";
+    this.foeTier = lvl; this.foeBoost = boost;
     this.ai = new AI(this.p2, lvl, boost);
-    this.p2.maxHp = CFG.MAX_HP * (.72 + Math.min(this.foeIdx, 14) * .035);
+    this.p2.maxHp = CFG.MAX_HP * Math.min(T.hpCap, T.hpBase + this.foeIdx * T.hpStep);
     this.p2.hp = this.p2.maxHp;
     this.p2.mods = Object.assign({}, def.mods);
-    this.p2.mods.dmg *= 1 + boost * .35;
-    this.p2.mods.speed *= 1 + boost * .18;
-    this.p2.mods.dmg *= (AI_LEVELS[lvl] || AI_LEVELS.medium).dmg;
+    this.p2.mods.dmg *= T.dmg * (1 + boost * T.dmgRamp);
+    this.p2.mods.speed *= 1 + boost * T.speedRamp;
     this.p2.x = CFG.ARENA_W / 2 + 150; this.p2.dir = -1;
     this.applyGuard();
   },
@@ -4152,7 +4178,8 @@ const Game = {
       b.st = "lose"; b.anim = "defeat"; b.animT = 1;
       a.st = "win"; a.anim = "victory"; a.animT = 0;
       UI.announce("FOE DOWN", true);
-      this.hpCarry = Math.min(CFG.MAX_HP, a.hp + CFG.ENDLESS_HEAL);
+      const T = ENDLESS_TIERS[this.endlessDiff] || ENDLESS_TIERS.medium;
+      this.hpCarry = Math.min(CFG.MAX_HP, a.hp + T.heal);
       return;
     }
     if (winner === a) { this.w1++; UI.announce(why === "time" ? "TIME · P1" : "K.O.", true); }
@@ -4205,12 +4232,17 @@ const Game = {
     }
   },
   saveBest() {
-    if (this.survT > (Store.data.bestTime || 0)) {
-      Store.data.bestTime = this.survT;
-      Store.data.bestFoes = this.foeIdx + 1;
-      Store.save();
-    }
-    this.best = Store.data.bestTime || 0;
+    const d = this.endlessDiff || "medium";
+    const B = Store.data.bestBy;
+    if (!B[d]) B[d] = { t: 0, f: 0 };
+    this.newRecord = this.survT > B[d].t;
+    if (this.newRecord) { B[d].t = this.survT; B[d].f = this.foeIdx + 1; }
+    // keep the flat fields as the best across every tier
+    let bt = 0, bf = 0;
+    for (const k in B) if (B[k].t > bt) { bt = B[k].t; bf = B[k].f; }
+    Store.data.bestTime = bt; Store.data.bestFoes = bf;
+    Store.save();
+    this.best = B[d].t;
   },
 
   /* ------------------------------ rendering --------------------------- */
@@ -4470,14 +4502,15 @@ const UI = {
       <div class="foot"><div class="btn" data-act="confirmStage">Confirm</div></div>`);
 
     mk("diff", `
-      <div class="sc-head"><div class="sc-title">Computer skill<small>Difficulty</small></div>
+      <div class="sc-head"><div class="sc-title" id="diffTitle">Computer skill<small>Difficulty</small></div>
         <div class="spacer"></div><div class="btn sm ghost" data-act="back">Back</div></div>
       <div class="sc-body" style="justify-content:center;align-items:center">
         <div class="menu">
-          <div class="btn wide" data-act="fight" data-diff="easy">Easy<span style="display:block;font-size:10px;letter-spacing:.16em;opacity:.65">Slow reactions · rarely blocks · single hits</span></div>
-          <div class="btn wide" data-act="fight" data-diff="medium">Medium<span style="display:block;font-size:10px;letter-spacing:.16em;opacity:.65">Blocks often · 2-hit strings · punishes sometimes</span></div>
-          <div class="btn wide" data-act="fight" data-diff="hard">Hard<span style="display:block;font-size:10px;letter-spacing:.16em;opacity:.65">Fast reads · tight spacing · punishes whiffs</span></div>
+          <div class="btn wide" data-act="fight" data-diff="easy">Easy<span class="dsub" data-d="easy"></span></div>
+          <div class="btn wide" data-act="fight" data-diff="medium">Medium<span class="dsub" data-d="medium"></span></div>
+          <div class="btn wide" data-act="fight" data-diff="hard">Hard<span class="dsub" data-d="hard"></span></div>
         </div>
+        <div class="hintline" id="diffFoot"></div>
       </div>`);
 
     mk("options", `
@@ -4495,7 +4528,7 @@ const UI = {
         ${this.rowSlider("Control size", "tcScale", .7, 1.5)}
         ${this.rowSlider("Control opacity", "tcOpacity", .25, 1)}
         ${this.rowSeg("Vibration", "vibrate", [[false, "Off"], [true, "On"]], "Where the device supports it")}
-        <div class="row"><div class="lbl">Best survival time<s id="optBest">—</s></div>
+        <div class="row"><div class="lbl">Best survival times<s id="optBest">—</s></div>
           <div class="btn sm ghost danger" data-act="clearBest">Reset</div></div>
       </div>`);
 
@@ -4551,7 +4584,7 @@ const UI = {
         </div></div>`);
 
     mk("endlessOver", `<div class="modalBox">
-        <h2 class="hd">Run Over</h2><p>You held the path for</p>
+        <h2 class="hd" id="eoTitle">Run Over</h2><p>You held the path for</p>
         <div class="bigStat" id="eoTime">0:00.0</div>
         <div class="subStat" id="eoSub">—</div>
         <div class="menu" style="margin-top:0">
@@ -4741,12 +4774,14 @@ const UI = {
       case "pickP2": this.sel.p2 = +t.dataset.i; this.refreshPicks(); break;
       case "pickStage": this.sel.stage = +t.dataset.i; this.refreshPicks(); break;
       case "confirmP1":
-        if (this.mode === "endless") { this.startEndless(); }
-        else this.push("p2");
+        this.push(this.mode === "endless" ? "diff" : "p2");
         this.refreshPicks(); break;
       case "confirmP2": this.push("stage"); this.refreshPicks(); break;
       case "confirmStage": this.push("diff"); break;
-      case "fight": this.sel.diff = t.dataset.diff; this.startVs(); break;
+      case "fight":
+        this.sel.diff = t.dataset.diff;
+        if (this.mode === "endless") this.startEndless(); else this.startVs();
+        break;
       case "resume": this.togglePause(false); break;
       case "quit": this.quit(); break;
       case "rematch":
@@ -4761,7 +4796,9 @@ const UI = {
         break;
       case "mlPick": this.mlChar = +t.dataset.i; this.paintMoveList(); break;
       case "clearBest":
-        Store.data.bestTime = 0; Store.data.bestFoes = 0; Store.save(); this.syncOptionUI(); this.refreshBest();
+        Store.data.bestTime = 0; Store.data.bestFoes = 0;
+        Store.data.bestBy = { easy: { t: 0, f: 0 }, medium: { t: 0, f: 0 }, hard: { t: 0, f: 0 } };
+        Store.save(); this.syncOptionUI(); this.refreshBest();
         break;
     }
   },
@@ -4774,6 +4811,7 @@ const UI = {
     const s = this.screens[name]; if (!s) return;
     s.classList.add("on"); this.cur = name;
     if (name === "options") this.syncOptionUI();
+    if (name === "diff") this.syncDiffScreen();
     if (name === "moves") { this.mlChar = Game.running && Game.p1 ? Math.max(0, ROSTER.indexOf(Game.p1.def)) : this.sel.p1; this.buildMoveList(); }
     if (name === "mode") this.refreshBest();
     Input.refreshVisible();
@@ -4818,7 +4856,7 @@ const UI = {
     $("#hud").classList.add("on");
     Game.applyQuality();
     Game.paused = false;
-    Game.startEndless(this.sel.p1);
+    Game.startEndless(this.sel.p1, this.sel.diff);
     Input.clearAll(); Input.refreshVisible();
   },
 
@@ -4839,12 +4877,44 @@ const UI = {
       bar("Power", d.stats.pow) + bar("Speed", d.stats.spd) + bar("Reach", d.stats.rng) + bar("Guard", d.stats.def) +
       `<div class="desc">${d.desc}</div>`;
   },
+  DIFF_COPY: {
+    vs: {
+      title: 'Computer skill<small>Difficulty</small>',
+      easy: "Slow reactions · rarely blocks · single hits",
+      medium: "Blocks often · 2-hit strings · punishes sometimes",
+      hard: "Fast reads · tight spacing · punishes whiffs",
+      foot: "Best of three rounds"
+    },
+    endless: {
+      title: 'Run difficulty<small>Endless Path</small>',
+      easy: "Foes stay weak longer · +24% health back per win",
+      medium: "Steady ramp · +16% health back per win",
+      hard: "Starts at Medium skill · fast ramp · +9% health back",
+      foot: "Best times are kept separately for each difficulty"
+    }
+  },
+  syncDiffScreen() {
+    const m = this.mode === "endless" ? "endless" : "vs";
+    const C = this.DIFF_COPY[m];
+    $("#diffTitle").innerHTML = C.title;
+    $$("#sc-diff .dsub").forEach(s => { s.textContent = C[s.dataset.d]; });
+    const f = $("#diffFoot");
+    if (m === "endless") {
+      const B = Store.data.bestBy || {};
+      const parts = ["easy", "medium", "hard"].map(k =>
+        k.toUpperCase() + " " + ((B[k] && B[k].t > 0) ? fmtTime(B[k].t) : "—"));
+      f.textContent = "Best · " + parts.join(" · ");
+    } else f.textContent = C.foot;
+  },
+  bestSummary() {
+    const B = Store.data.bestBy || {};
+    return ["easy", "medium", "hard"].map(k =>
+      k.charAt(0).toUpperCase() + k.slice(1) + " " +
+      ((B[k] && B[k].t > 0) ? fmtTime(B[k].t) : "—")).join("  ·  ");
+  },
   refreshBest() {
-    const b = Store.data.bestTime || 0;
     const line = $("#bestLine");
-    if (line) line.textContent = b > 0
-      ? "Endless best · " + fmtTime(b) + " · " + (Store.data.bestFoes || 0) + " foes"
-      : "Endless best · not set";
+    if (line) line.textContent = "Endless best · " + this.bestSummary();
   },
   syncOptionUI() {
     const s = Store.data;
@@ -4859,7 +4929,7 @@ const UI = {
       if (v === "true") v = true; else if (v === "false") v = false;
       b.classList.toggle("on", s[k] === v);
     });
-    const ob = $("#optBest"); if (ob) ob.textContent = (s.bestTime > 0 ? fmtTime(s.bestTime) : "not set");
+    const ob = $("#optBest"); if (ob) ob.textContent = this.bestSummary();
     Snd.applyVolumes(); Input.applyStyle();
   },
 
@@ -4909,7 +4979,8 @@ const UI = {
     if (g.mode === "endless") {
       clk.textContent = fmtTime(g.survT);
       clk.className = "small";
-      const meta = "Foe " + (g.foeIdx + 1) + " · Best " + fmtTime(Math.max(g.best, g.survT));
+      const T = ENDLESS_TIERS[g.endlessDiff] || ENDLESS_TIERS.medium;
+      const meta = "Foe " + (g.foeIdx + 1) + " · " + T.label + " · Best " + fmtTime(Math.max(g.best, g.survT));
       if (force || C.meta !== meta) { C.meta = meta; $("#roundLbl").textContent = meta; }
     } else {
       const cl = Math.ceil(g.timer);
@@ -4934,9 +5005,12 @@ const UI = {
     Music.play("menu");
   },
   showEndlessOver() {
-    const g = Game;
+    const g = Game, d = g.endlessDiff || "medium";
+    const B = (Store.data.bestBy || {})[d] || { t: 0 };
     $("#eoTime").textContent = fmtTime(g.survT);
-    $("#eoSub").textContent = (g.foeIdx + 1) + " foes faced · best " + fmtTime(Store.data.bestTime || 0);
+    $("#eoTitle").textContent = g.newRecord ? "New Record" : "Run Over";
+    $("#eoSub").textContent = (g.foeIdx + 1) + " foes faced · " +
+      (ENDLESS_TIERS[d] ? ENDLESS_TIERS[d].label : d) + " · best " + fmtTime(B.t);
     $("#hud").classList.remove("on");
     this.setEndlessHud(false);
     this.stack = []; this.show("endlessOver");
@@ -5090,8 +5164,10 @@ window.__T = {
     UI.hideAll(); UI.mode = "vs"; UI.sel.p1 = p1; UI.sel.p2 = p2; UI.sel.stage = st; UI.sel.diff = diff || "medium";
     UI.startVs(); return this.state();
   },
-  quickEndless(p1) {
-    UI.hideAll(); UI.mode = "endless"; UI.sel.p1 = p1; UI.startEndless(); return this.state();
+  quickEndless(p1, diff) {
+    UI.hideAll(); UI.mode = "endless"; UI.sel.p1 = p1;
+    if (diff) UI.sel.diff = diff;
+    UI.startEndless(); return this.state();
   },
   /* run N fixed steps with a given P1 input (AI still runs normally) */
   tick(n, inp) {
@@ -5123,6 +5199,7 @@ window.__T = {
       screen: UI.cur, mode: g.mode, phase: g.phase, running: g.running, paused: g.paused,
       round: g.round, w1: g.w1, w2: g.w2, timer: g.timer, q: g.q,
       survT: g.survT, foeIdx: g.foeIdx, best: Store.data.bestTime || 0,
+      endlessDiff: g.endlessDiff, foeTier: g.foeTier,
       stage: Stage.def ? Stage.def.id : null,
       p1: a && { name: a.def.name, hp: a.hp, st: a.st, x: a.x, y: a.y, dir: a.dir, combo: a.combo, air: a.air, move: a.moveName, crouch: a.crouch },
       p2: b && { name: b.def.name, hp: b.hp, st: b.st, x: b.x, y: b.y, dir: b.dir, combo: b.combo, air: b.air, move: b.moveName, crouch: b.crouch }
