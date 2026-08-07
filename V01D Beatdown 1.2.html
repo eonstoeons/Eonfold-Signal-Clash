@@ -163,6 +163,7 @@ canvas{display:block;image-rendering:auto}
 .stageCard .nm{position:absolute;left:0;right:0;bottom:0;padding:5px 7px;
   background:linear-gradient(0deg,rgba(0,0,0,.9),transparent);font-size:12px;
   font-family:Impact,"Arial Narrow Bold",system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase}
+.stageCard .nm .sub{display:block;opacity:.55;font-size:9px;letter-spacing:.14em;margin-top:1px}
 .stageCard.sel{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc),0 0 20px rgba(66,245,200,.28)}
 
 /* rows / options */
@@ -193,6 +194,18 @@ input[type=range]::-moz-range-thumb{width:16px;height:16px;background:var(--acc)
 #hud{position:absolute;inset:0;pointer-events:none;z-index:20;display:none;
   padding:calc(env(safe-area-inset-top,0px) + 6px) calc(env(safe-area-inset-right,0px) + 8px) 0 calc(env(safe-area-inset-left,0px) + 8px)}
 #hud.on{display:block}
+body.portrait #hud,body.portrait #announce{top:var(--playT,0px);height:var(--playH,100%);bottom:auto}
+body.portrait #hud .nm{font-size:clamp(8px,2.7vw,11px);letter-spacing:.04em}
+body.portrait .center{min-width:56px}
+body.portrait #hud{padding-left:calc(env(safe-area-inset-left,0px) + 5px);padding-right:calc(env(safe-area-inset-right,0px) + 5px)}
+body.portrait.tc-on #hud{padding-right:calc(env(safe-area-inset-right,0px) + 52px)}
+body.portrait #btnPause{width:calc(38px * var(--tScale,1));height:calc(28px * var(--tScale,1));right:calc(env(safe-area-inset-right,0px) + 6px)}
+body.portrait #btnPause i{height:13px;width:4px}
+body.portrait #clock{font-size:clamp(19px,7vw,32px)}
+body.portrait .hpbar{height:clamp(11px,3.4vw,16px)}
+body.portrait .pip{width:7px;height:7px}
+body.portrait .hp .nameRow{gap:4px}
+body.portrait #announce{top:calc(var(--playT,0px) + var(--playH,100%) * .12);height:auto}
 body.tc-on #hud{padding-right:calc(env(safe-area-inset-right,0px) + 58px)}
 .hudTop{display:flex;align-items:flex-start;gap:8px}
 .hp{flex:1;min-width:0}
@@ -288,6 +301,32 @@ body.tc-on #hud{padding-right:calc(env(safe-area-inset-right,0px) + 58px)}
 /* ---------- touch controls ---------- */
 #touch{position:absolute;inset:0;z-index:35;display:none;pointer-events:none;
   opacity:var(--tOpacity,.8);touch-action:none}
+/* ---- portrait: the pad gets its own panel under the fight ---- */
+#padPanel{position:absolute;left:0;right:0;bottom:0;height:var(--padH,0px);display:none;
+  pointer-events:none;z-index:34;
+  background:linear-gradient(180deg,#0a0c14 0%,#070810 100%);
+  border-top:1px solid #222738;
+  box-shadow:inset 0 12px 22px rgba(0,0,0,.6)}
+#padPanel::before{content:"";position:absolute;left:0;right:0;top:0;height:2px;
+  background:linear-gradient(90deg,transparent,rgba(66,245,200,.5),transparent)}
+body.portrait #padPanel.on{display:block}
+body.portrait #stickZone{left:0;bottom:0;width:52%;height:var(--padH,0px)}
+body.portrait #stickBase{
+  width:calc(126px * var(--tScale,1));height:calc(126px * var(--tScale,1));
+  left:calc(env(safe-area-inset-left,0px) + 25%);
+  bottom:calc(env(safe-area-inset-bottom,0px) + var(--padH,0px) * .5);
+  transform:translate(-50%,50%)}
+body.portrait #btnPad{
+  right:auto;left:72%;transform:translate(-50%,50%);
+  bottom:calc(env(safe-area-inset-bottom,0px) + var(--padH,0px) * .5);
+  width:calc(200px * var(--tScale,1));height:calc(200px * var(--tScale,1))}
+body.portrait .tbtn{width:calc(84px * var(--tScale,1));height:calc(84px * var(--tScale,1));
+  font-size:calc(30px * var(--tScale,1))}
+body.portrait .tbtn[data-k=A]{left:0;top:calc(58px * var(--tScale,1))}
+body.portrait .tbtn[data-k=S]{left:calc(58px * var(--tScale,1));top:0}
+body.portrait .tbtn[data-k=D]{left:calc(58px * var(--tScale,1));top:calc(116px * var(--tScale,1))}
+body.portrait .tbtn[data-k=F]{left:calc(116px * var(--tScale,1));top:calc(58px * var(--tScale,1))}
+body.portrait #tcToggle{bottom:calc(env(safe-area-inset-bottom,0px) + 4px)}
 #touch.on{display:block}
 #touch .zone{position:absolute;pointer-events:auto;touch-action:none}
 #stickZone{left:0;bottom:0;width:44%;height:74%}
@@ -362,17 +401,13 @@ body.tc-on #hud{padding-right:calc(env(safe-area-inset-right,0px) + 58px)}
 }
 @media (max-width:640px){
   .selWrap{flex-direction:column;gap:8px}
-  .infoPane{width:100%;flex-direction:row;flex-wrap:wrap;gap:5px 12px;align-items:center;max-height:112px}
+  .infoPane{width:100%;flex-direction:row;flex-wrap:wrap;gap:5px 12px;align-items:center;max-height:136px}
+  .infoPane h3,.infoPane .tagline{width:100%}
+  .infoPane .stat{flex:1 1 calc(50% - 12px);min-width:126px}
+  .infoPane .stat b{width:44px}
   .infoPane .desc{width:100%}
 }
-@media (orientation:portrait) and (max-width:900px){
-  #rotate{display:flex !important}
-}
-#rotate{position:absolute;inset:0;z-index:80;display:none;align-items:center;justify-content:center;
-  flex-direction:column;gap:14px;background:rgba(4,4,9,.97);text-align:center;padding:26px;pointer-events:auto}
-#rotate .ph{width:52px;height:88px;border:3px solid var(--acc);border-radius:8px;animation:rot 1.6s ease-in-out infinite}
-@keyframes rot{0%,40%{transform:rotate(0)}60%,100%{transform:rotate(90deg)}}
-#rotate.hide{display:none !important}
+/* portrait is a first-class layout now — the old rotate advisory is retired */
 </style>
 </head>
 <body>
@@ -405,6 +440,7 @@ body.tc-on #hud{padding-right:calc(env(safe-area-inset-right,0px) + 58px)}
   <div id="announce"><div class="txt" id="annTxt"></div></div>
 
   <!-- ============ TOUCH ============ -->
+  <div id="padPanel"></div>
   <div id="touch">
     <div class="zone" id="stickZone"></div>
     <div id="stickBase"><div class="ring"></div><div id="stickKnob"></div></div>
@@ -419,10 +455,6 @@ body.tc-on #hud{padding-right:calc(env(safe-area-inset-right,0px) + 58px)}
   <!-- ============ SCREENS ============ -->
   <div id="ui"></div>
 
-  <div id="rotate"><div class="ph"></div>
-    <div class="hd" style="font-size:18px">Rotate your device</div>
-    <div style="color:#8a90a8;font-size:12px;max-width:280px">V01D Beatdown plays in landscape. Turn your phone sideways to fight.</div>
-  </div>
 
   <div id="boot">
     <div class="hd" style="font-size:clamp(24px,7vw,44px);color:#dff9f1">V01D BEATDOWN</div>
@@ -444,10 +476,18 @@ body.tc-on #hud{padding-right:calc(env(safe-area-inset-right,0px) + 58px)}
 const GAME_TITLE = "V01D Beatdown";
 /* ----------------------------------------------------------------------- */
 
+/* Two authored viewports. The world, the fighters and every stage are shared;
+   only the window onto them changes, so rotating a phone mid-fight is safe. */
+const VIEWS = {
+  landscape: { VW: 960, VH: 540, GROUND: 462, ARENA: 1720 },
+  portrait: { VW: 560, VH: 680, GROUND: 545, ARENA: 980 }
+};
+let VIEW_MODE = "landscape";
+
 const CFG = {
   title: GAME_TITLE,
   version: "1.0.0",
-  VW: 960, VH: 540,            // logical render resolution (16:9)
+  VW: 960, VH: 540,            // logical render resolution (current viewport)
   GROUND: 462,                 // y of the floor line in logical px
   FPS: 60, DT: 1 / 60,
   ROUND_TIME: 99,
@@ -463,6 +503,16 @@ const CFG = {
   ENDLESS_STAGE_EVERY: 3,      // change scenery every N foes
   STORE_KEY: "v01d_beatdown_v1"
 };
+
+/* switch viewport; returns true if anything actually changed */
+function applyView(mode) {
+  if (!VIEWS[mode]) mode = "landscape";
+  if (mode === VIEW_MODE && CFG.VW === VIEWS[mode].VW) return false;
+  VIEW_MODE = mode;
+  const v = VIEWS[mode];
+  CFG.VW = v.VW; CFG.VH = v.VH; CFG.GROUND = v.GROUND; CFG.ARENA_W = v.ARENA;
+  return true;
+}
 
 /* ------------------------------ math utils ------------------------------ */
 const PI = Math.PI, TAU = PI * 2;
@@ -2379,6 +2429,7 @@ const STAGE_DEFS = [
 ];
 
 const FAR_W = 1120, FAR_H = 400, MID_W = 1340, MID_H = 380, NEAR_W = 1580, NEAR_H = 250;
+const FLOOR_H = 330;   // tall enough to reach the bottom of the portrait viewport
 const PX_FAR = .18, PX_MID = .46, PX_NEAR = .82;
 
 /* blit only the slice of a parallax layer that is actually on screen */
@@ -2387,7 +2438,14 @@ function layer(c, cv, x, y) {
   if (x < 0) { sx = Math.floor(-x); w -= sx; x = 0; }
   if (x + w > CFG.VW) w = Math.ceil(CFG.VW - x);
   if (w <= 0) return;
-  c.drawImage(cv, sx, 0, w, cv.height, x, y, w, cv.height);
+  // vertical clipping matters as much as horizontal: the floor strip is tall
+  // enough for the portrait viewport, so in landscape most of it is off-screen
+  // and blitting those rows is pure wasted fill on a software rasteriser.
+  let sy = 0, h = cv.height;
+  if (y < 0) { sy = Math.floor(-y); h -= sy; y = 0; }
+  if (y + h > CFG.VH) h = Math.ceil(CFG.VH - y);
+  if (h <= 0) return;
+  c.drawImage(cv, sx, sy, w, h, x, y, w, h);
 }
 
 const Stage = {
@@ -2398,7 +2456,7 @@ const Stage = {
   ensureCanvases() {
     if (!this.far) {
       this.far = mkCanvas(FAR_W, FAR_H); this.mid = mkCanvas(MID_W, MID_H);
-      this.near = mkCanvas(NEAR_W, NEAR_H); this.floor = mkCanvas(NEAR_W, 120);
+      this.near = mkCanvas(NEAR_W, NEAR_H); this.floor = mkCanvas(NEAR_W, FLOOR_H);
       this.skyCv = mkCanvas(CFG.VW, CFG.VH);
       this.bandCv = mkCanvas(CFG.VW, 230);
       this.foreCv = mkCanvas(CFG.VW, CFG.VH);
@@ -2437,7 +2495,14 @@ const Stage = {
   },
   /* ---- painting ---- */
   /* all static full-screen washes are baked once per stage load */
+  /* called on load and whenever the viewport changes shape */
+  applyView() { if (this.def) this.bakeOverlays(); },
   bakeOverlays() {
+    if (this.skyCv.width !== CFG.VW || this.skyCv.height !== CFG.VH) {
+      this.skyCv.width = CFG.VW; this.skyCv.height = CFG.VH;
+      this.foreCv.width = CFG.VW; this.foreCv.height = CFG.VH;
+      this.bandCv.width = CFG.VW;
+    }
     const sc = this.skyCv.getContext("2d");
     sc.setTransform(1, 0, 0, 1, 0, 0); sc.clearRect(0, 0, CFG.VW, CFG.VH);
     this.sky(sc, this.def.id);
@@ -2641,9 +2706,10 @@ function neonSign(c, x, y, w, h, col, text) {
   c.restore();
 }
 function floorStrip(c, w, col, gloss, R) {
-  vgrad(c, 0, 0, w, 120, shade(col, .06), shade(col, -.55));
-  for (let i = 0; i < 90; i++) {
-    const x = R() * w, y = R() * 100, s = 4 + R() * 26;
+  const H = FLOOR_H;
+  vgrad(c, 0, 0, w, H, shade(col, .06), shade(col, -.62));
+  for (let i = 0; i < 160; i++) {
+    const x = R() * w, y = R() * (H - 8), s = 4 + R() * 26;
     c.fillStyle = rgba(R() > .5 ? "#ffffff" : "#000000", .03 + R() * .05);
     c.fillRect(x, y, s, 2 + R() * 3);
   }
@@ -3573,18 +3639,20 @@ Fighter.prototype.canBlock = function (mv) {
   if (this.st === "attack" || this.st === "hit" || this.st === "knockdown" ||
     this.st === "downed" || this.st === "getup" || this.st === "intro") return 0;
   const manual = !!this.back();
-  // Auto guard: a fighter who is neither attacking nor pressing forward keeps a
-  // passive guard. Their STANCE still decides what it covers, so crouch-only
-  // attacks (sweeps, low pokes) go straight through a standing guard.
-  const auto = !manual && this.autoGuard && !this.attackHeld() && !this.fwd() &&
-    this.bufT <= 0 && this.st !== "land";
-  if (!manual && !auto) return 0;
-  const g = mv.guard;
-  let ok;
-  if (g === "any") ok = true;
-  else if (g === "low") ok = !!this.crouch;
-  else ok = !this.crouch;                // high must be guarded standing
-  if (!ok) return 0;
+  const busy = this.attackHeld() || this.bufT > 0;
+  // CROUCH GUARD: crouching is itself a defensive stance. Any fighter — player
+  // or CPU — who is crouching and not attacking guards automatically, and that
+  // guard is a full one: it covers everything a standing guard covers PLUS the
+  // lows a standing guard cannot reach.
+  const crouchGuard = !manual && !!this.crouch && !busy;
+  // Standing auto guard is the optional assist and follows the same rules.
+  const auto = !manual && !crouchGuard && this.autoGuard && !busy && !this.fwd() &&
+    this.st !== "land";
+  if (!manual && !crouchGuard && !auto) return 0;
+  // Only lows demand a crouching stance. Everything else — highs, mids and
+  // jump-ins — is guarded from either stance, so crouching is never a downgrade
+  // on defence.
+  if (mv.guard === "low" && !this.crouch) return 0;
   return manual ? 1 : 2;
 };
 Fighter.prototype.takeHit = function (mv, atk, hx, hy) {
@@ -4097,7 +4165,7 @@ const Game = {
     this.phase = "intro"; this.phaseT = 0;
     this.lagHp1 = a.hp; this.lagHp2 = b.hp;
     FX.clear();
-    this.camX = clamp((a.x + b.x) / 2 - CFG.VW / 2, 0, CFG.ARENA_W - CFG.VW);
+    this.camX = clamp((a.x + b.x) / 2 - CFG.VW / 2, 0, Math.max(0, CFG.ARENA_W - CFG.VW));
     UI.announce(this.mode === "endless"
       ? (this.foeIdx === 0 ? "ENDLESS PATH" : "FOE " + (this.foeIdx + 1))
       : "ROUND " + this.round, true);
@@ -4149,9 +4217,22 @@ const Game = {
     this.lagHp2 = approach(this.lagHp2, b.hp, 42 * dt);
     this.camUpdate(dt);
   },
+  /* keep everyone inside the arena after a viewport / orientation change */
+  clampToArena() {
+    const list = [this.p1, this.p2];
+    for (const f of list) {
+      if (!f) continue;
+      const half = 30 * f.hScale;
+      f.x = clamp(f.x, half, CFG.ARENA_W - half);
+    }
+    if (this.p1 && this.p2) {
+      this.camX = this.camTarget =
+        clamp((this.p1.x + this.p2.x) / 2 - CFG.VW / 2, 0, Math.max(0, CFG.ARENA_W - CFG.VW));
+    }
+  },
   camUpdate(dt) {
     const mid = (this.p1.x + this.p2.x) / 2;
-    this.camTarget = clamp(mid - CFG.VW / 2, 0, CFG.ARENA_W - CFG.VW);
+    this.camTarget = clamp(mid - CFG.VW / 2, 0, Math.max(0, CFG.ARENA_W - CFG.VW));
     this.camX += (this.camTarget - this.camX) * Math.min(1, dt * 7);
   },
 
@@ -4250,7 +4331,10 @@ const Game = {
     const cam = this.camX + this.pathOff;
     c.setTransform(RSCALE, 0, 0, RSCALE, 0, 0);
     c.save();
-    c.translate(FX.shakeX, FX.shakeY);
+    // Snap the shake to whole device pixels. A fractional translate pushes every
+    // subsequent blit onto the resampling path, which costs more than the whole
+    // rest of the frame on a software rasteriser.
+    c.translate(Math.round(FX.shakeX * RSCALE) / RSCALE, Math.round(FX.shakeY * RSCALE) / RSCALE);
     Stage.drawBack(c, cam, this.q);
     // fighters, back-to-front by depth (the one further right draws in front)
     const a = this.p1, b = this.p2;
@@ -4308,7 +4392,12 @@ const Input = {
     };
     window.addEventListener("keydown", e => {
       Snd.resume();
-      if (e.code === "Escape" || e.code === "KeyP") { e.preventDefault(); UI.togglePause(); return; }
+      // Escape / P / Enter all drive the SAME control as the on-screen pause
+      // button; Enter only pauses while a fight is live so menus keep using it
+      // to confirm.
+      const wantsPause = e.code === "Escape" || e.code === "KeyP" ||
+        (e.code === "Enter" && Game.running && !Game.paused);
+      if (wantsPause) { e.preventDefault(); this.pressPause(); return; }
       if (e.code === "F2") { DEBUG.boxes = !DEBUG.boxes; return; }
       const k = KEYMAP[e.code];
       if (k) { this.kb[k] = 1; e.preventDefault(); }
@@ -4401,9 +4490,27 @@ const Input = {
       Snd.resume();
     }, true);
 
+    // rotating the device re-lays the pad out; portrait always shows it
+    const orient = () => {
+      const p = window.innerHeight > window.innerWidth;
+      if (p && Store.data.tcVisible !== "off") this.setTouch(true);
+      this.refreshVisible();
+    };
+    window.addEventListener("orientationchange", () => setTimeout(orient, 140));
+    if (window.matchMedia) {
+      const mq = window.matchMedia("(orientation: portrait)");
+      if (mq.addEventListener) mq.addEventListener("change", () => setTimeout(orient, 60));
+      else if (mq.addListener) mq.addListener(() => setTimeout(orient, 60));
+    }
     if (Store.data.tcVisible === "on") this.setTouch(true);
     else if (Store.data.tcVisible === "auto" && matchMedia("(pointer:coarse)").matches) this.setTouch(true);
     this.applyStyle();
+  },
+  /* single entry point for every pause control, on screen or on the keyboard */
+  pressPause() {
+    const btn = $("#btnPause");
+    if (btn) { btn.classList.add("hit"); setTimeout(() => btn.classList.remove("hit"), 130); }
+    UI.togglePause();
   },
   setTouch(on) {
     this.touchOn = !!on;
@@ -4414,6 +4521,7 @@ const Input = {
   },
   refreshVisible() {
     document.body.classList.toggle("tc-on", this.touchOn);
+    if (typeof resize === "function") resize();
     $("#touch").classList.toggle("on", this.touchOn && Game.running && !Game.paused);
     $("#tcToggle").classList.toggle("on", (this.lastPointerTouch || this.touchOn) && Game.running && !Game.paused);
   },
@@ -4541,7 +4649,7 @@ const UI = {
           <div><kbd>↑</kbd> Jump</div><div><kbd>↓</kbd> Crouch</div>
           <div><kbd>A</kbd> Left punch</div><div><kbd>S</kbd> Right punch</div>
           <div><kbd>D</kbd> Left kick</div><div><kbd>F</kbd> Right kick</div>
-          <div><kbd>Esc</kbd> / <kbd>P</kbd> Pause</div><div><kbd>F2</kbd> Show hitboxes</div>
+          <div><kbd>Esc</kbd>/<kbd>P</kbd>/<kbd>Enter</kbd> Pause</div><div><kbd>F2</kbd> Show hitboxes</div>
         </div></div>
         <div class="row"><div class="kbdmap">
           <div><kbd>↓+A</kbd> Crouch jab</div><div><kbd>↓+S</kbd> Uppercut (knockdown)</div>
@@ -4550,8 +4658,9 @@ const UI = {
           <div><kbd>↑+A/S</kbd> Air punch</div><div><kbd>↑+D/F</kbd> Air kick</div>
         </div></div>
         <div class="row"><div class="lbl">Blocking<s>Hold the direction AWAY from your opponent. Crouch-block stops lows; standing block stops highs. A deliberate block takes zero damage.</s></div></div>
-        <div class="row"><div class="lbl">Auto guard<s>On by default. Whenever you are not attacking and not walking forward you keep a passive guard, so you are not punished for hesitating. It follows your stance — standing auto guard will NOT stop a sweep, and it leaks a small amount of chip damage. Holding away still blocks better.</s></div></div>
-        <div class="row"><div class="lbl">Touch<s>Drag anywhere in the lower-left to steer: forward, back, up to jump, down to crouch. Hold away to block. A/S/D/F attack, all multitouch.</s></div></div>
+        <div class="row"><div class="lbl">Auto guard<s>On by default. Whenever you are not attacking and not walking forward you keep a passive guard, so you are not punished for hesitating. Standing auto guard will NOT stop a sweep or a low poke — duck those. It leaks a small amount of chip damage; holding away still blocks for free.</s></div></div>
+        <div class="row"><div class="lbl">Touch<s>Drag anywhere in the lower-left to steer: forward, back, up to jump, down to crouch. Hold away to block. A/S/D/F attack, all multitouch. Rotate the device and the pad re-lays itself out — in portrait it moves into its own panel under the fight.</s></div></div>
+        <div class="row"><div class="lbl">Crouch guard<s>Crouching is a full guard by itself. Any fighter who is crouching and not attacking automatically blocks everything — lows, mids, highs and jump-ins alike. You never have to hold away as well. This applies to the computer too.</s></div></div>
       </div>`);
 
     mk("moves", `
@@ -4626,7 +4735,7 @@ const UI = {
       const c = el("div", "stageCard");
       c.dataset.act = "pickStage"; c.dataset.i = i;
       const cv = mkCanvas(288, 162); c.appendChild(cv);
-      c.appendChild(el("div", "nm", s.name + " <span style='opacity:.55;font-size:9px;letter-spacing:.14em'>" + s.sub + "</span>"));
+      c.appendChild(el("div", "nm", s.name + "<span class='sub'>" + s.sub + "</span>"));
       sg.appendChild(c);
     });
   },
@@ -4673,8 +4782,8 @@ const UI = {
     html += '<div class="mlSec">Advancing &amp; Air</div>';
     html += row("→ S", "Lunge Punch", "steps in", dmgOf("lunge"));
     html += row("→ F", "Thrust Kick", "steps in · big pushback", dmgOf("pushKick"));
-    html += row("↑ A/S", "Air Punch", "must be blocked standing", dmgOf("airPunch"));
-    html += row("↑ D/F", "Air Kick", "must be blocked standing", dmgOf("airKick"));
+    html += row("↑ A/S", "Air Punch", "beats a standing walk-in", dmgOf("airPunch"));
+    html += row("↑ D/F", "Air Kick", "beats a standing walk-in", dmgOf("airKick"));
     html += '<div class="mlSec">Chain strings — everyone has these</div>';
     CHAIN_ROUTES.forEach(c => { html += row(c.in, c.note, "", ""); });
     const sigs = SIGS[d.id];
@@ -4789,7 +4898,7 @@ const UI = {
         break;
       case "changeFighter": this.hideAll(); this.stack = ["mode"]; this.push("p1"); this.refreshPicks(); break;
       case "retryEndless": this.startEndless(); break;
-      case "pause": this.togglePause(); break;
+      case "pause": Input.pressPause(); break;
       case "tctoggle":
         Input.setTouch(!Input.touchOn);
         Store.data.tcVisible = Input.touchOn ? "on" : "off"; Store.save(); this.syncOptionUI();
@@ -5028,9 +5137,42 @@ const UI = {
 let RSCALE = 1;
 const CV = $("#game"), CTX = CV.getContext("2d", { alpha: false });
 
+/* everything that has to happen when the viewport changes shape */
+function onViewChanged() {
+  document.body.classList.toggle("portrait", VIEW_MODE === "portrait");
+  if (Stage.def) Stage.applyView();
+  if (Game.p1 && Game.p2) Game.clampToArena();
+  if (Input.bound) Input.refreshVisible();
+}
+
+let _resizing = false;
 function resize() {
+  if (_resizing) return;                 // onViewChanged can call back into us
+  _resizing = true;
+  try { doResize(); } finally { _resizing = false; }
+}
+function doResize() {
   const w = window.innerWidth, h = window.innerHeight;
-  const s = Math.min(w / CFG.VW, h / CFG.VH);
+  // pick the viewport that matches the screen shape
+  if (applyView(w >= h ? "landscape" : "portrait")) onViewChanged();
+
+  // in portrait the touch pad gets a dedicated strip under the fight; the
+  // canvas takes the full width and the panel takes exactly what is left over
+  const padOn = VIEW_MODE === "portrait" && Input.touchOn;
+  let s, padH = 0, topAlign = false;
+  if (padOn) {
+    s = w / CFG.VW;
+    let ch0 = CFG.VH * s;
+    const minPad = clamp(h * .3, 190, 360);
+    if (h - ch0 < minPad) { ch0 = h - minPad; s = ch0 / CFG.VH; }
+    padH = Math.round(h - CFG.VH * s);
+    topAlign = true;
+  } else {
+    s = Math.min(w / CFG.VW, h / CFG.VH);
+  }
+  document.body.style.setProperty("--padH", padH + "px");
+  const pp = $("#padPanel"); if (pp) pp.classList.toggle("on", padOn);
+  const availH = Math.max(120, h - padH);
   const cap = Game.q >= 2 ? 2 : Game.q === 1 ? 1.5 : 1;
   const dpr = Math.min(window.devicePixelRatio || 1, cap);
   let rs = clamp(s * dpr, .55, 2.2);
@@ -5040,16 +5182,21 @@ function resize() {
   else if (Math.abs(rs - 2) < .22) rs = 2;
   const bw = Math.round(CFG.VW * rs), bh = Math.round(CFG.VH * rs);
   if (CV.width !== bw || CV.height !== bh) { CV.width = bw; CV.height = bh; }
-  CV.style.width = Math.round(CFG.VW * s) + "px";
-  CV.style.height = Math.round(CFG.VH * s) + "px";
-  CV.style.left = Math.round((w - CFG.VW * s) / 2) + "px";
-  CV.style.top = Math.round((h - CFG.VH * s) / 2) + "px";
+  const cw = Math.round(CFG.VW * s), ch = Math.round(CFG.VH * s);
+  const top = topAlign ? 0 : Math.round((availH - ch) / 2);
+  CV.style.width = cw + "px";
+  CV.style.height = ch + "px";
+  CV.style.left = Math.round((w - cw) / 2) + "px";
+  CV.style.top = top + "px";
+  // the HUD, announcer and banners live inside the play area, not the pad strip
+  document.body.style.setProperty("--playT", top + "px");
+  document.body.style.setProperty("--playH", ch + "px");
   RSCALE = rs;
   CTX.imageSmoothingEnabled = true;
   CTX.imageSmoothingQuality = Game.q >= 2 ? "medium" : "low";
 }
 window.addEventListener("resize", resize);
-window.addEventListener("orientationchange", () => setTimeout(resize, 120));
+window.addEventListener("orientationchange", () => { setTimeout(resize, 60); setTimeout(resize, 260); });
 
 /* --------------------------------- loop --------------------------------- */
 let last = 0, acc = 0, raf = 0, hudT = 0;
@@ -5111,14 +5258,17 @@ function boot() {
   steps.push(["Assembling interface", () => { UI.build(); Input.init(); FX.init(); }]);
   ROSTER.forEach(d => steps.push(["Forging " + d.name.split(" ")[0], () => { Game.atlasFor(d); }]));
   steps.push(["Painting portraits", () => UI.paintPortraits()]);
-  const scratch = mkCanvas(CFG.VW, CFG.VH);
+  const scratch = mkCanvas(VIEWS.landscape.VW, VIEWS.landscape.VH);
   STAGE_DEFS.forEach((s, i) => steps.push(["Building " + s.name, () => {
     if (!UI._thumbScratch) UI._thumbScratch = scratch;
+    const restore = VIEW_MODE;
+    applyView("landscape");                       // thumbnails are always 16:9
     Stage.load(i);
     const sc = scratch.getContext("2d"); sc.setTransform(1, 0, 0, 1, 0, 0);
     Stage.drawBack(sc, 270, 2); Stage.drawFore(sc, 2);
     const cv = $$("#gridStage .stageCard")[i].querySelector("canvas"), g = cv.getContext("2d");
-    g.drawImage(scratch, 0, 0, CFG.VW, CFG.VH, 0, 0, cv.width, cv.height);
+    g.drawImage(scratch, 0, 0, VIEWS.landscape.VW, VIEWS.landscape.VH, 0, 0, cv.width, cv.height);
+    if (applyView(restore)) onViewChanged();
   }]));
   steps.push(["Ready", () => {
     Snd.stopAmbience();
@@ -5141,11 +5291,6 @@ function boot() {
   };
   run();
 }
-
-/* dismiss the rotate advisory */
-document.addEventListener("click", e => {
-  if (e.target.closest("#rotate")) $("#rotate").classList.add("hide");
-});
 
 resize();
 boot();
@@ -5205,6 +5350,7 @@ window.__T = {
       p2: b && { name: b.def.name, hp: b.hp, st: b.st, x: b.x, y: b.y, dir: b.dir, combo: b.combo, air: b.air, move: b.moveName, crouch: b.crouch }
     };
   },
+  view() { return { mode: VIEW_MODE, VW: CFG.VW, VH: CFG.VH, ground: CFG.GROUND, arena: CFG.ARENA_W }; },
   counts() {
     return {
       screens: $$("#ui .screen").length,
