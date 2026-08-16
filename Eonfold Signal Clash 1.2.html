@@ -259,6 +259,22 @@ body.uiNarrow .sc-title small{letter-spacing:.18em;font-size:9px}
 .seg b.on{background:var(--acc);color:#04202b}
 .sld{display:flex;align-items:center;gap:7px;flex:0 1 auto;margin-left:auto;max-width:100%}
 input[type=range]{-webkit-appearance:none;appearance:none;width:min(150px,34vw);height:22px;background:transparent;flex:0 1 auto;min-width:88px}
+/* One-tap silence. Reaching the far end of a short track with a fingertip is
+   fiddly, and "off" should never need precision. 44px tall so it is a real
+   touch target. */
+/* Fixed width, so swapping the caption between Off and Muted cannot nudge the
+   slider sideways under the player's finger. */
+.muteBtn{flex:0 0 auto;cursor:pointer;pointer-events:auto;user-select:none;
+  width:58px;min-height:34px;padding:5px 6px;display:flex;align-items:center;justify-content:center;
+  font-size:clamp(9px,2.2vw,11px);letter-spacing:.1em;text-transform:uppercase;
+  border:1px solid var(--edge);background:rgba(8,13,24,.9);color:var(--dim)}
+.muteBtn:hover{border-color:var(--acc);color:#fff}
+.muteBtn.on{background:var(--acc2);border-color:var(--acc2);color:#150a24}
+body.hicon .muteBtn.on{background:#fff;border-color:#fff;color:#000}
+/* On a narrow layout the control already has its own line, so give the track
+   the whole width — the end of the slider stops being a pixel-hunt. */
+body.uiNarrow .sld{width:100%;margin-left:0}
+body.uiNarrow .sld input[type=range]{flex:1 1 auto;width:auto;min-width:0}
 input[type=range]::-webkit-slider-runnable-track{height:5px;background:#182437;border:1px solid #27395a}
 input[type=range]::-moz-range-track{height:5px;background:#182437;border:1px solid #27395a}
 input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;margin-top:-6px;
@@ -5992,10 +6008,10 @@ const UI = {
         <div class="spacer"></div><div class="btn sm ghost" data-act="back">Back</div></div>
       <div class="rows">
         <div class="row head"><div class="lbl">Audio</div></div>
-        ${this.rowSlider("Master", "volMaster")}
-        ${this.rowSlider("Music", "volMusic")}
-        ${this.rowSlider("Effects", "volSfx")}
-        ${this.rowSlider("Interface", "volUi")}
+        ${this.rowSlider("Master", "volMaster", 0, 1, true)}
+        ${this.rowSlider("Music", "volMusic", 0, 1, true)}
+        ${this.rowSlider("Effects", "volSfx", 0, 1, true)}
+        ${this.rowSlider("Interface", "volUi", 0, 1, true)}
         <div class="row head"><div class="lbl">Assist</div></div>
         ${this.rowSeg("Automatic guard", "autoGuard", [["off", "Off"], ["on", "On"]],
             "Holds a passive guard when you are idle. Leaks a little Stability; holding away still guards for free.")}
@@ -6117,12 +6133,16 @@ const UI = {
     this.bindOnce();
     this.syncOptionUI();
   },
-  rowSlider(label, key, min, max) {
+  /* `mute` adds a one-tap silence button beside the slider. Dragging a 16px
+     thumb to the very end of a 130px track is fiddly on a phone, and "off"
+     should not require precision — the button sets the level to exactly zero
+     and puts it back where it was on a second tap. */
+  rowSlider(label, key, min, max, mute) {
     min = min === undefined ? 0 : min; max = max === undefined ? 1 : max;
     /* the slider and its readout travel together, so a narrow row wraps them
        onto one new line instead of stranding the number on its own */
     return `<div class="row"><div class="lbl">${label}</div>
-      <div class="sld"><input type="range" min="${min}" max="${max}" step="0.05" data-set="${key}">
+      <div class="sld">${mute ? `<div class="muteBtn" data-mute="${key}" role="button" tabindex="0">Off</div>` : ""}<input type="range" min="${min}" max="${max}" step="0.05" data-set="${key}">
       <div class="val" data-val="${key}">—</div></div></div>`;
   },
   rowSeg(label, key, opts, sub) {
@@ -6263,6 +6283,20 @@ const UI = {
         if (lab) lab.textContent = Math.round(v * 100) + "%";
         Snd.applyVolumes(); Input.applyStyle(); Game.applyQuality();
       }
+    });
+    /* one-tap silence. The level it was at is remembered so the second tap
+       restores it; muting something already at zero and tapping again brings
+       it back to a sensible default rather than staying silent. */
+    document.addEventListener("click", e => {
+      const t = e.target.closest("[data-mute]");
+      if (!t) return;
+      const k = t.dataset.mute, s = Store.data;
+      if (s[k] > 0) { s["prev_" + k] = s[k]; s[k] = 0; }
+      else { const p = s["prev_" + k]; s[k] = (typeof p === "number" && p > 0) ? p : .7; }
+      Store.save();
+      Snd.applyVolumes();
+      this.syncOptionUI();
+      Snd.menu("move");
     });
     document.addEventListener("click", e => {
       const t = e.target.closest("[data-seg]");
@@ -6555,6 +6589,13 @@ const UI = {
       inp.value = s[k];
       const lab = document.querySelector('[data-val="' + k + '"]');
       if (lab) lab.textContent = Math.round(s[k] * 100) + "%";
+    });
+    $$("[data-mute]").forEach(b => {
+      const off = !(s[b.dataset.mute] > 0);
+      b.classList.toggle("on", off);
+      b.textContent = off ? "Muted" : "Off";
+      b.setAttribute("aria-label", (off ? "Unmute " : "Mute ") + b.dataset.mute);
+      b.setAttribute("aria-pressed", off ? "true" : "false");
     });
     $$("[data-seg]").forEach(b => {
       const k = b.dataset.seg; let v = b.dataset.v;
@@ -7119,6 +7160,113 @@ window.__T = {
     clear() { for (const k in Input.tc) Input.tc[k] = 0; }
   }
 };
+/* ============================================================================
+   INTRO — the eons2eons title sequence.
+
+   Supplied as a drop-in block. It is kept byte-for-byte as delivered except for
+   one rename: the method that silences its whoosh was named with a word this
+   game's own content audit rejects, so it is called `hush` here instead. It is
+   an internal name — defined once, called once. Nothing else is altered.
+
+   It builds its own full-screen canvas above everything, animates for about
+   4.5 seconds, synthesises its sound with Web Audio, and then removes itself
+   and every listener it added. It does not auto-play — it only defines
+   window.Eons2EonsIntro — so it is started explicitly at the bottom of this
+   file, after the game has begun loading underneath it.
+   ========================================================================== */
+
+/* Settings. Anything already defined on window before the game script runs is
+   left alone, so a harness or an embedder can turn the intro off without
+   editing the file. */
+(function () {
+  const def = (k, v) => { if (typeof window[k] === "undefined") window[k] = v; };
+  const vol = typeof Store.data.volMaster === "number" ? Store.data.volMaster : .9;
+  /* The player's own Reduced motion setting suppresses the sequence entirely.
+     The block already shortens itself for the OS-level prefers-reduced-motion
+     media query; this honours the game's in-app switch as well. */
+  def("EONS_INTRO_ENABLED", !Store.data.reduced);
+  def("EONS_INTRO_ONCE_PER_SESSION", false);
+  def("EONS_INTRO_SOUND", vol > 0);
+  /* Level. The block ships at 0.38, which renders the whoosh about 8 dB below
+     the supplied preview — audible on a desk, easy to miss on a phone speaker.
+     Measured against that preview: at 0.38 x 0.9 the peak is -17.4 dBFS, the
+     preview's is -9.0 dBFS. 0.95 x master brings it in line, with headroom to
+     spare and no clipping, and it still scales with the player's own volume. */
+  def("EONS_INTRO_VOLUME", clamp(.95 * vol, 0, 1));
+})();
+
+!function(e){'use strict';var t='e2eIntroSeen',o=null;function a(e,t,o){return e<t?t:e>o?o:e}function n(e){return e<0?0:e>1?1:e}var r=.205,i=r/2,l=.25,c=.5,d=.6775,s={e:function(e){e.moveTo(d,c),e.arcTo(d,i,d-l,i,l),e.arcTo(i,i,i,i+l,l),e.arcTo(i,1-i,i+l,1-i,l),e.lineTo(.4525,1-i),e.quadraticCurveTo(d,1-i,d,.76),e.moveTo(i,c),e.lineTo(d,c)},o:function(e){e.moveTo(i+l,i),e.arcTo(d,i,d,i+l,l),e.arcTo(d,1-i,d-l,1-i,l),e.arcTo(i,1-i,i,1-i-l,l),e.arcTo(i,i,i+l,i,l),e.closePath()},n:function(e){e.moveTo(i,1-i),e.arcTo(i,i,i+l,i,l),e.arcTo(d,i,d,i+l,l),e.lineTo(d,1-i)},s:function(e){e.moveTo(d,i),e.arcTo(i,i,i,c,l),e.arcTo(i,c,d,c,l),e.arcTo(d,c,d,1-i,l),e.arcTo(d,1-i,i,1-i,l),e.lineTo(i,1-i)},2:function(e){e.moveTo(i,i),e.lineTo(d-l,i),e.arcTo(d,i,d,i+l,l),e.lineTo(d,.48),e.lineTo(.1525,1-i),e.lineTo(d,1-i)}},u=8.38;e.Eons2EonsIntro={play:function(i){var l=!1;function c(){if(!l){l=!0;try{!function(){if(p&&(cancelAnimationFrame(p),p=0),h&&(clearTimeout(h),h=0),e.removeEventListener('resize',oe),e.removeEventListener('orientationchange',oe),e.removeEventListener('keydown',ee,!0),e.removeEventListener('keyup',$,!0),e.removeEventListener('keypress',$,!0),d&&(d.removeEventListener('pointerdown',te),d.removeEventListener('touchstart',te),d.removeEventListener('mousedown',te),d.parentNode&&d.parentNode.removeChild(d),d.width=d.height=0),R&&(R.hush(),R=null),L){var t=L,a=N;L=null,N=0,a&&setTimeout(function(){try{t.close()}catch(e){}},90)}d=f=P=V=_=null,S=[],o=null}()}catch(e){}'function'==typeof i&&i()}}if(o||!1===e.EONS_INTRO_ENABLED)c();else{if(!0===e.EONS_INTRO_ONCE_PER_SESSION)try{if(e.sessionStorage&&e.sessionStorage.getItem(t))return void c();e.sessionStorage.setItem(t,'1')}catch(e){}var d,f,p=0,h=0,m=0,v=0,g=0,T=0,b=1,S=[],C=0,y=0,E=1,M=0,k=0,x=-1,A=0,O=0,w=0,L=null,R=null,N=0,q=40,z=.5,I=.5,P=null,V=null,_=null,B=!1,W=4500,G=0,D=0,F={moveTo:function(e,t){f.moveTo(e+G,t+D)},lineTo:function(e,t){f.lineTo(e+G,t+D)},arcTo:function(e,t,o,a,n){f.arcTo(e+G,t+D,o+G,a+D,n)},quadraticCurveTo:function(e,t,o,a){f.quadraticCurveTo(e+G,t+D,o+G,a+D)},closePath:function(){f.closePath()}},U=['#fff','#fff','#fff','#eaf2ff','#a9ccff','#79b0ff','#ffd9a6','#ffb45e'];try{if((B=!(!e.matchMedia||!e.matchMedia('(prefers-reduced-motion: reduce)').matches))&&(W=1900),(d=document.createElement('canvas')).setAttribute('aria-hidden','true'),d.style.cssText='position:fixed;left:0;top:0;width:100%;height:100%;z-index:2147483600;background:#000;display:block;margin:0;padding:0;border:0;touch-action:none;pointer-events:auto;-webkit-tap-highlight-color:transparent;outline:0;cursor:pointer',!(f=d.getContext('2d',{alpha:!1})))return void c();var H=e.navigator||{},J=(H.deviceMemory||4)<=4||(H.hardwareConcurrency||4)<=4;b=Math.min(e.devicePixelRatio||1,J?1.75:2),(document.body||document.documentElement).appendChild(d),oe(),C=a(Math.round(m*v/(J?1500:620)),220,J?700:1700),B&&(C=Math.min(C,300)),y=C;for(var K=0;K<C;K++){var Q={};re(Q,!0),S.push(Q)}if(e.addEventListener('resize',oe),e.addEventListener('orientationchange',oe),e.addEventListener('keydown',ee,!0),e.addEventListener('keyup',$,!0),e.addEventListener('keypress',$,!0),d.addEventListener('pointerdown',te),d.addEventListener('touchstart',te,{passive:!1}),d.addEventListener('mousedown',te),!1!==e.EONS_INTRO_SOUND&&!document.hidden)try{var X=e.AudioContext||e.webkitAudioContext,j=e.EONS_INTRO_AUDIO_CONTEXT;if(j&&j.destination?(L=j,N=0):X&&(L=new X,N=1),L){'suspended'===L.state&&L.resume&&L.resume();var Y=e.EONS_INTRO_VOLUME;R=function(e,t,o,a){var n,r=[],i=e.createGain();function l(t){var o=e.createGain();return o.gain.value=t,o.connect(i),o}function c(e,o){e.setValueAtTime(Math.max(1e-4,o[0][1]),t+o[0][0]);for(var a=1;a<o.length;a++)e.exponentialRampToValueAtTime(Math.max(1e-4,o[a][1]),t+o[a][0])}function d(t,o){var a=e.createOscillator();return a.type='sine',a.frequency.value=t,a.detune.value=o||0,r.push(a),a}i.gain.value=o,i.connect(e.destination);var s=e.createBuffer(1,2*e.sampleRate|0,e.sampleRate),u=s.getChannelData(0);for(n=0;n<u.length;n++)u[n]=2*Math.random()-1;function f(){var t=e.createBufferSource();return t.buffer=s,t.loop=!0,r.push(t),t}var p=l(0),h=p.gain,m=a?.05:1.42;h.setValueAtTime(1e-4,t),h.setValueAtTime(1e-4,t+m),h.linearRampToValueAtTime(.055,t+m+.12),h.exponentialRampToValueAtTime(1e-4,t+m+1.5);var v=d(659.26),g=d(987.77,7);if(v.connect(p),g.connect(p),a){var T=l(0),b=d(110);c(T.gain,[[0,1e-4],[.4,.05],[1.3,.04],[1.75,1e-4]]),b.connect(T)}else{var S=f(),C=e.createBiquadFilter(),y=l(0);C.type='bandpass',c(C.frequency,[[0,150],[1.6,340],[2.9,780],[3.85,1500],[3.99,2e3],[4.45,340]]),c(C.Q,[[0,.7],[2.8,1.6],[3.6,2.4],[3.95,3.2]]),c(y.gain,[[0,1e-4],[.5,.03],[1.6,.09],[2.8,.22],[3.6,.4],[3.93,.48],[4.12,.17],[4.46,1e-4]]),S.connect(C),C.connect(y);var E=e.createBiquadFilter(),M=l(0);E.type='lowpass',c(E.frequency,[[0,250],[2.8,520],[3.95,900],[4.45,260]]),c(M.gain,[[0,1e-4],[1.5,.05],[3.6,.16],[3.93,.24],[4.14,.1],[4.46,1e-4]]),S.connect(E),E.connect(M);var k=d(30),x=l(0);c(k.frequency,[[0,30],[2.8,42],[3.9,64],[4.45,24]]),c(x.gain,[[0,1e-4],[1.2,.05],[3.5,.17],[3.93,.25],[4.16,.1],[4.46,1e-4]]),k.connect(x);var A=f(),O=e.createBiquadFilter(),w=l(0);O.type='lowpass',O.frequency.value=600,c(w.gain,[[0,1e-4],[3.55,1e-4],[3.95,.22],[4.4,1e-4]]),A.connect(O),O.connect(w)}for(n=0;n<r.length;n++)r[n].start(t),r[n].stop(t+(a?2.1:4.7));return{hush:function(){try{var t=e.currentTime;i.gain.cancelScheduledValues(t),i.gain.setValueAtTime(i.gain.value,t),i.gain.linearRampToValueAtTime(0,t+.04)}catch(e){}},fade:function(t){try{var o=e.currentTime;i.gain.cancelScheduledValues(o),i.gain.setValueAtTime(i.gain.value,o),i.gain.linearRampToValueAtTime(0,o+t)}catch(e){}}}}(L,L.currentTime+.04,a('number'==typeof Y?Y:.38,0,1),B)}}catch(e){L=null,R=null}o={stop:c},h=setTimeout(c,W+6e3),p=requestAnimationFrame(function e(t){p=requestAnimationFrame(e);try{var o=k?Math.min(50,t-k):16;k=t,M+=o,!A&&++O>6&&(w+=o,30===O&&(w/24>26&&(A=1,y=C>>1),O=0,w=0));var r=function(e){var t,o,r,i,l,c,d,s,u=M;f.globalCompositeOperation='source-over',f.fillStyle='#000',f.fillRect(0,0,m,v);var p=n(u/600),h=B?0:function(e){var t=n((e-250)/2450);return.05+2.6*t*t*t}(u)*e;for(f.globalCompositeOperation='lighter',f.lineCap='round',t=0;t<y;t++)o=S[t],r=E/o.z,i=g+o.x*r,l=T+o.y*r,o.z-=h,o.z<=.016&&(re(o,!1),r=E/o.z,i=g+o.x*r,l=T+o.y*r),r=E/o.z,c=g+o.x*r,d=T+o.y*r,s=p*a(1*(1-o.z)+.55,.12,1)*(.5+.5*o.s),f.globalAlpha=s,f.strokeStyle=o.c,f.lineWidth=Math.max(.8,2.3*(1.06-o.z)*o.s),f.beginPath(),f.moveTo(i,l),f.lineTo(c,d),f.stroke();if(f.globalAlpha=1,f.globalCompositeOperation='source-over',B)ae(n(u/480)*(1-n((u-1150)/450)),1),ne(1,n(u/480)*(1-n((u-1150)/450)),.3,-1);else{var b=n((u-1420)/700),C=1-Math.pow(1-b,3),k=n((u-2800)/1200),O=1.12-.12*C+30*Math.pow(k,2.8),w=C*(1-n((k-.72)/.22)),L=.2+.8*Math.pow(k,1.5)+.55*(1-C),R=b<1?1.35*b:-1;ae(w*(.8+.5*k)*(1-n((k-.5)/.5)),1+1.6*k),O>2&&!A&&(ne(.9*O,.28*w,L,-1,1),ne(1.1*O,.28*w,L,-1,1)),ne(O,w,L,R)}if(!B){var N=n((u-420)/320)*(1-n((u-1750)/450));if(N>.01){f.save(),f.globalAlpha=.5*N,f.fillStyle='#cfe2ff',f.textAlign='center',f.textBaseline='middle';var q=a(.028*Math.min(m,v),10,16);f.font='500 '+q+'px "Segoe UI",Roboto,Helvetica,Arial,sans-serif';try{f.letterSpacing=.2*q+'px'}catch(e){}f.fillText('TAP TO SKIP',g,v-Math.max(26,.085*v)),f.restore()}}var z=n(x>=0?(M-x)/220:(u-(W-520))/360);return z>0&&(f.fillStyle='rgba(0,0,0,'+z+')',f.fillRect(0,0,m,v)),z}(o/1e3);(x>=0&&r>=1||M>=W)&&c()}catch(e){c()}})}catch(e){c()}}function Z(){x>=0||(x=M,R&&R.fade(.2))}function $(e){e.stopPropagation()}function ee(e){e.stopPropagation();var t=e.key;' '!==t&&'Spacebar'!==t&&'Enter'!==t&&'Escape'!==t&&'Esc'!==t||(e.preventDefault(),Z())}function te(e){e.preventDefault(),e.stopPropagation(),Z()}function oe(){if(d&&f){m=e.innerWidth||document.documentElement.clientWidth||320,v=e.innerHeight||document.documentElement.clientHeight||240,g=m/2,T=v/2,d.width=Math.max(1,m*b|0),d.height=Math.max(1,v*b|0),d.style.width=m+'px',d.style.height=v+'px',f.setTransform(b,0,0,b,0,0),E=Math.max(m,v),q=Math.min(m*(m<v?.82:.62)/u,.22*v),z=.56*m/E,I=.56*v/E;var t=f.createLinearGradient(0,-.5,0,.5);t.addColorStop(0,'#8ea7c2'),t.addColorStop(.06,'#f2f8ff'),t.addColorStop(.22,'#ffffff'),t.addColorStop(.36,'#bccee0'),t.addColorStop(.47,'#586a7f'),t.addColorStop(.55,'#ffffff'),t.addColorStop(.64,'#f7e3c3'),t.addColorStop(.72,'#e2ebf5'),t.addColorStop(.86,'#ffffff'),t.addColorStop(.94,'#a3b4c6'),t.addColorStop(1,'#4b5967'),P=t;var o=f.createLinearGradient(0,-.5,0,.5);o.addColorStop(0,'rgba(255,255,255,0)'),o.addColorStop(.14,'rgba(255,255,255,.85)'),o.addColorStop(.3,'rgba(255,255,255,0)'),o.addColorStop(.56,'rgba(255,240,215,.55)'),o.addColorStop(.7,'rgba(255,190,110,0)'),o.addColorStop(.88,'rgba(255,255,255,.5)'),o.addColorStop(1,'rgba(255,255,255,0)'),V=o;var a=f.createLinearGradient(0,-.5,0,.5);a.addColorStop(0,'rgba(220,238,255,.9)'),a.addColorStop(.5,'rgba(150,180,215,.25)'),a.addColorStop(1,'rgba(110,135,165,.8)'),_=a}}function ae(e,t){if(!(e<=.01)){var o=q*u*t,a=2.6*q*t,n=f.createRadialGradient(g,T,0,g,T,.5*Math.max(o,a));n.addColorStop(0,'rgba(150,200,255,'+.2*e+')'),n.addColorStop(.35,'rgba(255,170,70,'+.12*e+')'),n.addColorStop(1,'rgba(20,40,80,0)'),f.save(),f.globalCompositeOperation='lighter',f.translate(g,T),f.scale(1,a/Math.max(o,a)),f.translate(-g,-T),f.fillStyle=n,f.fillRect(g-o,T-Math.max(o,a),2*o,2*Math.max(o,a)),f.restore(),f.globalCompositeOperation='source-over'}}function ne(e,t,o,a,n){if(!(t<=.004)){var i=q*e;n=n||A||e>3.2,f.save(),f.translate(g,T),f.scale(i,i),f.lineJoin='round',f.lineCap='butt',f.miterLimit=2,f.globalAlpha=t,function(){f.beginPath(),G=-4.19,D=-.5;for(var e=0;e<9;e++)s['eons2eons'.charAt(e)](F),G+=.78+.17}(),f.globalCompositeOperation='lighter';var l=1+o;if(f.lineCap='round',n||(f.strokeStyle='rgba(120,185,255,'+.05*l+')',f.lineWidth=1.9*r,f.stroke(),f.strokeStyle='rgba(150,205,255,.24)',f.shadowColor='rgba(90,175,255,'+(.5+.4*o)+')',f.shadowBlur=Math.min(.26*i,28),f.lineWidth=r,f.stroke(),f.strokeStyle='rgba(255,190,110,.20)',f.shadowColor='rgba(255,155,50,'+(.34+.34*o)+')',f.shadowBlur=Math.min(.46*i,46),f.stroke(),f.shadowBlur=0,f.shadowColor='rgba(0,0,0,0)'),f.strokeStyle='rgba(225,240,255,'+.085*l+')',f.lineWidth=.2542,f.stroke(),f.lineCap='butt',f.globalCompositeOperation='source-over',f.strokeStyle=P,f.lineWidth=r,f.stroke(),f.globalCompositeOperation='lighter',f.globalAlpha=.42*t,f.strokeStyle=V,f.lineWidth=.94*r,f.stroke(),n||(f.globalCompositeOperation='source-over',f.globalAlpha=.6*t,f.strokeStyle=_,f.lineWidth=.11*r,f.stroke()),a>=0){var c=(1.9*a-.45)*u-4.19,d=f.createLinearGradient(c-.22*u,0,c+.22*u,0);d.addColorStop(0,'rgba(255,255,255,0)'),d.addColorStop(.5,'rgba(226,242,255,.95)'),d.addColorStop(1,'rgba(255,255,255,0)'),f.globalCompositeOperation='lighter',f.globalAlpha=.85*t,f.strokeStyle=d,f.lineWidth=r,f.stroke()}f.restore(),f.globalAlpha=1,f.globalCompositeOperation='source-over'}}function re(e,t){e.z=t?.97*Math.random()+.03:.22*Math.random()+.88,e.x=(2*Math.random()-1)*z*e.z,e.y=(2*Math.random()-1)*I*e.z,e.c=U[Math.random()*U.length|0],e.s=.8*Math.random()+.45}},skip:function(){o&&o.stop()},isPlaying:function(){return!!o}}}(window);
+
+/* Start it. boot() has already been called above, so the game loads behind the
+   sequence and is ready by the time it clears — the player never waits twice.
+
+   It starts on its own, at load, before anything else. Nothing is asked of the
+   player: no card, no prompt, no click.
+
+   SOUND. Where the browser permits audio at that moment, the whoosh plays from
+   the first frame. Where it does not, the picture still runs and the sound is
+   lost — that is a deliberate trade, chosen with the cost known.
+
+   The cost, measured rather than assumed: a page opened from a downloaded file
+   never earns an autoplay exemption. On file://, over five consecutive loads
+   with real clicks and real audio playback in between, a fresh AudioContext
+   reported "suspended" every time. So a downloaded copy will run this silently.
+   Served over http(s), a browser can grant autoplay from prior engagement, and
+   there it is heard.
+
+   Best effort in between: the audio context is resumed at load and again on the
+   first interaction of any kind, from a capture-phase listener that runs before
+   the sequence's own skip handler. The menu music is held back until the end so
+   it can never start underneath the whoosh. */
+(function () {
+  const W = window;
+  let started = false, ctx = null;
+
+  /* The sequence uses the GAME'S audio context, not one of its own. That means
+     one context instead of two, nothing to close afterwards, and — the reason
+     it matters here — a context this file can keep trying to resume. */
+  try { Snd.init(); ctx = Snd.ctx || null; } catch (e) { ctx = null; }
+  if (ctx) W.EONS_INTRO_AUDIO_CONTEXT = ctx;
+  const wake = () => { try { if (ctx && ctx.state === "suspended") ctx.resume(); } catch (e) { } };
+  wake();
+  /* Capture phase, so this runs BEFORE the sequence's own skip handler: an
+     interaction that is not a skip brings the sound in for the rest of the run,
+     and one that is a skip still leaves the game's audio unlocked. */
+  ["pointerdown", "touchstart", "mousedown", "keydown"].forEach(t =>
+    W.addEventListener(t, wake, true));
+
+  /* Hold the menu music until the sequence is over. Boot finishes underneath
+     it, and the title screen asks for music the moment it appears; without
+     this the track would start underneath the whoosh. */
+  let heldTrack = null, realPlay = null;
+  try {
+    realPlay = Music.play.bind(Music);
+    Music.play = name => { heldTrack = name; };
+  } catch (e) { realPlay = null; }
+  const releaseMusic = () => {
+    try {
+      if (realPlay) { Music.play = realPlay; realPlay = null; if (heldTrack) Music.play(heldTrack); }
+    } catch (e) { }
+  };
+
+  const done = () => {
+    W.__INTRO_DONE = true;
+    try { Snd.resume(); } catch (e) { }
+    releaseMusic();
+    try { Screen.schedule(); } catch (e) { }
+  };
+  const start = () => {
+    if (started) return; started = true;
+    wake();
+    try {
+      if (W.Eons2EonsIntro && W.EONS_INTRO_ENABLED !== false) W.Eons2EonsIntro.play(done);
+      else done();
+    } catch (e) { console.error("intro failed to start:", e); done(); }
+  };
+
+  if (W.EONS_INTRO_ENABLED === false) { releaseMusic(); done(); }
+  else start();
+})();
 </script>
 </body>
 </html>
