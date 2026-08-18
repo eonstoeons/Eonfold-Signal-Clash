@@ -776,13 +776,31 @@ function fitLandscapeVW(w, h) {
 
 /* switch viewport; returns true if anything actually changed.
    `vw` is honoured for the landscape window only; portrait stays authored. */
+/* While an online match is live the two physics-bearing dimensions are frozen.
+   GROUND and ARENA_W are normally re-derived from the viewport (landscape
+   462/1720 vs portrait 545/980) and fed straight into Fighter.update() and
+   separate() — so without this lock a phone in portrait and a desktop in
+   landscape would simulate two differently sized arenas, and a mid-match
+   window resize would silently move both fighters on one side only.
+   VW/VH stay live: they only move the camera, which is not simulation. */
+const NETLOCK = { on: false, GROUND: 0, ARENA_W: 0 };
+function lockArena(ground, arena) {
+  NETLOCK.on = true;
+  NETLOCK.GROUND = ground; NETLOCK.ARENA_W = arena;
+  CFG.GROUND = ground; CFG.ARENA_W = arena;
+}
+function unlockArena() { NETLOCK.on = false; applyView(VIEW_MODE, CFG.VW); }
+
 function applyView(mode, vw) {
   if (!VIEWS[mode]) mode = "landscape";
   const v = VIEWS[mode];
   const wantVW = (mode === "landscape" && vw > 0) ? vw : v.VW;
+  const locked = NETLOCK.on;
   if (mode === VIEW_MODE && CFG.VW === wantVW) return false;
   VIEW_MODE = mode;
-  CFG.VW = wantVW; CFG.VH = v.VH; CFG.GROUND = v.GROUND; CFG.ARENA_W = v.ARENA;
+  CFG.VW = wantVW; CFG.VH = v.VH;
+  if (locked) { CFG.GROUND = NETLOCK.GROUND; CFG.ARENA_W = NETLOCK.ARENA_W; }
+  else { CFG.GROUND = v.GROUND; CFG.ARENA_W = v.ARENA; }
   return true;
 }
 
@@ -809,11 +827,54 @@ function mulberry(seed) {
   };
 }
 const RNG = mulberry(0x5EED1);          // art / arena RNG
-let gRnd = mulberry(0xB00B5);           // gameplay RNG
+
+/* ---------------------------------------------------------------------------
+   TWO GAMEPLAY RNG STREAMS  (required for deterministic netplay)
+
+   The cosmetic stream (gRnd) is consumed by particles, stage ambience and
+   audio variation. Its draw COUNT is not deterministic across machines: stage
+   ambience is called from Game.render(), which runs at the display's refresh
+   rate, and FX particle loops scale with Game.q, the per-device auto-tuned
+   quality level. Two players would burn through it at different speeds.
+
+   The simulation stream (simRnd) is consumed ONLY from inside Game.step(), by
+   code whose call count cannot vary by device or frame rate. It is reseeded
+   from the match seed so both peers roll identically, and its internal state
+   is saveable/restorable so rollback can rewind it.
+
+   Rule for anything added later: if it can change the outcome of a fight, it
+   uses srnd(). If it is only seen, it uses rnd().
+   ------------------------------------------------------------------------- */
+let gRnd = mulberry(0xB00B5);           // COSMETIC — never networked
 const rnd = () => gRnd();
 const rndR = (a, b) => a + gRnd() * (b - a);
 const rndI = (a, b) => Math.floor(a + gRnd() * (b - a + 1));
 const pick = arr => arr[Math.floor(gRnd() * arr.length)];
+
+function mulberryS(seed) {              // same generator, with a readable cursor
+  let a = seed >>> 0;
+  const f = function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+  f.get = () => a >>> 0;
+  f.set = v => { a = v >>> 0; };
+  return f;
+}
+let simRnd = mulberryS(0xB00B5);        // SIMULATION — synced, rollback-safe
+
+/* Which stream simulation code draws from depends on whether a networked match
+   is live. OFFLINE it is gRnd, exactly as in the original build and in exactly
+   the original call order, so single-player AI behaviour is bit-for-bit
+   unchanged. ONLINE it is simRnd, which no cosmetic code can touch. */
+function simSrc() { return (window.SCNet && SCNet.online) ? simRnd : gRnd; }
+const srnd = () => simSrc()();
+const srndR = (a, b) => a + simSrc()() * (b - a);
+const srndI = (a, b) => Math.floor(a + simSrc()() * (b - a + 1));
+const spick = arr => arr[Math.floor(simSrc()() * arr.length)];
+function seedSim(seed) { simRnd = mulberryS(seed >>> 0); }
 
 /* ------------------------------ colour utils ---------------------------- */
 function hex2rgb(h) {
@@ -3870,6 +3931,9 @@ const FX = {
     for (let i = 0; i < this.RMAX; i++) this.rings[i * this.RSTRIDE + 2] = 0;
   },
   spawn(x, y, vx, vy, life, size, type, cs) {
+    /* rollback replays frames that already happened: emitting their particles
+       again would multiply every effect by the number of resimulations */
+    if (window.SCNet && SCNet.resim) return;
     const S = this.STRIDE;
     if (this.n >= this.MAX) { this.n = this.MAX - 1; this.p.copyWithin(0, S); }
     const o = this.n * S, P = this.p;
@@ -4372,6 +4436,9 @@ Fighter.prototype.reset = function (x, dir) {
   this.bufMove = null; this.bufT = 0; this.gadget = 0;
   this.cd = {};
   this.chainSeq.length = 0; this.sigName = null;
+  /* set only by startMove2()/takeHit(); initialised here so that every field a
+     rollback snapshot captures always exists, in every snapshot */
+  this.moveTotal = 0; this.healDone = false; this.stunMax = 0; this.blockStunMax = 0;
 };
 Fighter.prototype.hitboxScale = function () { return this.hScale * (this.def.build.arm || 1); };
 Fighter.prototype.stabilityPct = function () { return clamp(this.hp / this.maxHp, 0, 1); };
@@ -5015,38 +5082,38 @@ AI.prototype.update = function (dt, opp) {
   /* ---- reactive layer (runs every frame, but on DELAYED information) ---- */
   // block incoming attacks
   if (phase === 1 || phase === 2) {
-    if (dist < reach * 1.7 && rnd() < this.block * .5 + .35 && rnd() < this.block) {
+    if (dist < reach * 1.7 && srnd() < this.block * .5 + .35 && srnd() < this.block) {
       o[awayKey] = 1;
       // guess the guard height; better players guess right more often
       const wantLow = guard === 1;
-      const correct = rnd() < (.45 + this.block * .55);
+      const correct = srnd() < (.45 + this.block * .55);
       o.d = (correct ? wantLow : !wantLow) ? 1 : 0;
       f.setInput(o); return;
     }
   }
   // anti-air
-  if (oppAir && dist < reach * 1.3 && rnd() < this.antiAir * .16) {
+  if (oppAir && dist < reach * 1.3 && srnd() < this.antiAir * .16) {
     o.d = 1; this.press("s", 3);
   }
 
   /* ---- decision layer ---- */
   this.decT -= dt * 60;
   if (this.decT <= 0) {
-    this.decT = this.decide + rndI(0, 5);
+    this.decT = this.decide + srndI(0, 5);
     const punishable = phase === 3 || oppStunned === 1;
-    if (dist < reach * .95 && punishable && rnd() < this.punish) {
+    if (dist < reach * .95 && punishable && srnd() < this.punish) {
       this.intent = "attack"; this.comboLeft = this.comboMax;
     } else if (dist < reach * this.L.spacing) {
-      if (rnd() < this.rest) this.intent = "rest";
-      else if (rnd() < this.aggr) { this.intent = "attack"; this.comboLeft = 1 + (rnd() < .5 ? this.comboMax - 1 : 0); }
-      else if (rnd() < .3) this.intent = "retreat";
+      if (srnd() < this.rest) this.intent = "rest";
+      else if (srnd() < this.aggr) { this.intent = "attack"; this.comboLeft = 1 + (srnd() < .5 ? this.comboMax - 1 : 0); }
+      else if (srnd() < .3) this.intent = "retreat";
       else this.intent = "block";
     } else if (dist < reach * 2.6) {
-      if (rnd() < this.aggr * .8) this.intent = "approach";
-      else if (rnd() < this.L.wander) this.intent = "retreat";
+      if (srnd() < this.aggr * .8) this.intent = "approach";
+      else if (srnd() < this.L.wander) this.intent = "retreat";
       else this.intent = "approach";
     } else {
-      this.intent = rnd() < this.L.jump ? "jumpin" : "approach";
+      this.intent = srnd() < this.L.jump ? "jumpin" : "approach";
     }
     this.intentT = 0;
   }
@@ -5056,7 +5123,7 @@ AI.prototype.update = function (dt, opp) {
   switch (this.intent) {
     case "approach":
       o[towardKey] = 1;
-      if (dist < reach * 1.05 && rnd() < .3) { this.intent = "attack"; this.comboLeft = 1; }
+      if (dist < reach * 1.05 && srnd() < .3) { this.intent = "attack"; this.comboLeft = 1; }
       break;
     case "retreat":
       o[awayKey] = 1;
@@ -5064,11 +5131,11 @@ AI.prototype.update = function (dt, opp) {
       break;
     case "block":
       o[awayKey] = 1;
-      if (rnd() < .02) o.d = 1;
+      if (srnd() < .02) o.d = 1;
       if (this.intentT > .55) this.intent = "approach";
       break;
     case "rest":                                   // deliberate breathing room
-      if (this.intentT > .5 + rnd() * .6) this.intent = "approach";
+      if (this.intentT > .5 + srnd() * .6) this.intent = "approach";
       break;
     case "jumpin":
       if (!f.air && f.st !== "jump") { o.u = 1; o[towardKey] = 1; }
@@ -5081,17 +5148,17 @@ AI.prototype.update = function (dt, opp) {
         f.st === "block" || (f.st === "attack" && f.chainOK))) {
         if (this.comboLeft > 0) {
           this.comboLeft--;
-          const roll = rnd();
+          const roll = srnd();
           // deliberately weak choices for easy AI
-          if (rnd() < this.throwaway) this.press(pick(["a", "k", "s", "f"]), 3);
+          if (srnd() < this.throwaway) this.press(spick(["a", "k", "s", "f"]), 3);
           else if (dist < reach * .62) this.press(roll < .4 ? "a" : roll < .68 ? "s" : roll < .86 ? "k" : "f", 3);
           else this.press(roll < .3 ? "k" : roll < .6 ? "f" : roll < .82 ? "s" : "a", 3);
-          if (rnd() < this.lowChance + this.lowBias * .35) o.d = 1;   // mix in lows
-        } else { this.intent = rnd() < .5 ? "block" : "retreat"; }
+          if (srnd() < this.lowChance + this.lowBias * .35) o.d = 1;   // mix in lows
+        } else { this.intent = srnd() < .5 ? "block" : "retreat"; }
       }
       break;
     }
-    default: o[towardKey] = rnd() < .5 ? 1 : 0;
+    default: o[towardKey] = srnd() < .5 ? 1 : 0;
   }
   if (this.hold > 0) { o[this.holdKey] = 1; this.hold--; }
   f.setInput(o);
@@ -5348,6 +5415,16 @@ const Game = {
   /* Automatic guard: off / on. It only ever applies to the competitor the
      person is controlling, plus the Lab's guarding training partner. */
   applyGuard() {
+    /* Automatic guard changes canBlock() results, so it is part of the
+       simulation. Offline it follows the local preference; online BOTH
+       fighters take the value agreed at match start, because a preference
+       that only one side knows about would desync the fight. */
+    if (window.SCNet && SCNet.online) {
+      const on = !!SCNet.setup.autoGuard;
+      if (this.p1) this.p1.autoGuard = on;
+      if (this.p2) this.p2.autoGuard = on;
+      return;
+    }
     const on = (Store.data.autoGuard || "on") !== "off";
     if (this.p1) this.p1.autoGuard = on;
     if (this.p2) this.p2.autoGuard = (this.mode === "lab" && this.lab.dummy === "guard");
@@ -5503,7 +5580,7 @@ const Game = {
       const other = winner === a ? b : a;
       other.st = "lose"; other.anim = "recalibrate"; other.animT = 0;
       FX.recalibrate(other.x, CFG.GROUND, other.core);
-      if (rnd() < .8) setTimeout(() => Snd.victory(), 700);
+      if (!(window.SCNet && SCNet.resim) && rnd() < .8) setTimeout(() => Snd.victory(), 700);
     }
     UI.syncHud(true);
   },
@@ -6626,6 +6703,7 @@ const UI = {
 
   /* --------------------------------- HUD --------------------------------- */
   sigFlash(name) {
+    if (window.SCNet && SCNet.resim) return;    // already flashed the first time
     const b = $("#sigBanner");
     if (!b) return;
     b.firstElementChild.textContent = name;
@@ -6636,6 +6714,7 @@ const UI = {
   setEndlessHud(on) { const n = $("#endlessHud"); if (n) n.classList.toggle("on", !!on); },
   setLabHud(on) { const n = $("#labHud"); if (n) n.classList.toggle("on", !!on); },
   announce(text, hold) {
+    if (window.SCNet && SCNet.resim) return;   // do not re-announce replayed frames
     const n = $("#annTxt");
     n.textContent = text;
     n.className = "txt";
@@ -6885,8 +6964,12 @@ function frame(ts) {
   acc += dt;
   let steps = 0;
   while (acc >= CFG.DT && steps < 5) {
-    if (Game.running && !Game.paused && Game.p1) Game.p1.setInput(Input.poll());
-    Game.step(CFG.DT);
+    if (window.SCNet && SCNet.active) {
+      SCNet.frameStep();                 // owns input, prediction and rollback
+    } else {
+      if (Game.running && !Game.paused && Game.p1) Game.p1.setInput(Input.poll());
+      Game.step(CFG.DT);
+    }
     acc -= CFG.DT; steps++;
   }
   if (steps === 5) acc = 0;
@@ -7065,6 +7148,12 @@ window.__T = {
     return this.state();
   },
   autoGuard(mode) { Store.data.autoGuard = mode; Game.applyGuard(); return mode; },
+  seedSim(v) { seedSim(v >>> 0); return v >>> 0; },
+  simCursor() { return simRnd.get(); },
+  lockArena(g, a) { lockArena(g, a); return { g: CFG.GROUND, a: CFG.ARENA_W }; },
+  unlockArena() { unlockArena(); return { g: CFG.GROUND, a: CFG.ARENA_W }; },
+  net() { return window.SCNet ? SCNet.stats() : null; },
+  hash() { return window.SCNet ? SCNet.hash() : null; },
   noAI(v) { if (v) { this._ai = Game.ai; Game.ai = null; } else if (this._ai) { Game.ai = this._ai; this._ai = null; } },
   setHp(a, b) { if (a != null && Game.p1) Game.p1.hp = a; if (b != null && Game.p2) Game.p2.hp = b; },
   setTimer(t) { Game.timer = t; },
@@ -7268,5 +7357,1403 @@ window.__T = {
   else start();
 })();
 </script>
+
+<!-- =============================================================== -->
+<!-- BEGIN EONNET ONLINE 1v1  (additive: no existing screen is modified) -->
+<!-- =============================================================== -->
+<script>
+/* ===========================================================================
+   EonNet — drop-in multiplayer client
+   ---------------------------------------------------------------------------
+   One file. No dependencies. Works from any origin (itch.io, GitHub Pages,
+   your own site, file://). Same file for every game — only `game` changes.
+
+       const net = EonNet.create({
+         url:   'wss://eonnet.<subdomain>.workers.dev',
+         game:  'signal-clash',
+         build: '1.21',
+         name:  'GUY',
+         input: 'pointer'          // 'pointer' | 'touch'
+       });
+
+   CONTROL PLANE  -> WebSocket to the lobby (cheap, free tier)
+   DATA PLANE     -> WebRTC DataChannel peer-to-peer (free at any scale),
+                     with automatic relay fallback when ICE fails.
+   =========================================================================== */
+(function (root) {
+  'use strict';
+
+  var PROTO = 1;
+  var DEF_ICE = [
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:stun.l.google.com:19302' }
+  ];
+
+  function now() { return Date.now(); }
+  function noop() { }
+
+  /* tiny event emitter */
+  function Bus() { this.m = {}; }
+  Bus.prototype.on = function (k, fn) { (this.m[k] || (this.m[k] = [])).push(fn); return this; };
+  Bus.prototype.off = function (k, fn) {
+    var a = this.m[k]; if (!a) return this;
+    var i = a.indexOf(fn); if (i >= 0) a.splice(i, 1); return this;
+  };
+  Bus.prototype.emit = function (k, a, b) {
+    var l = this.m[k]; if (!l) return;
+    for (var i = 0; i < l.length; i++) { try { l[i](a, b); } catch (e) { console.error('[eonnet]', k, e); } }
+  };
+
+  /* a wrong server URL must fail with a clear error, not a JSON parse crash */
+  function readJson(r) {
+    var ct = r.headers.get('content-type') || '';
+    if (ct.indexOf('json') < 0) {
+      return r.text().then(function () { throw new Error('bad_server_response'); });
+    }
+    return r.json();
+  }
+
+  function httpBase(url) {
+    return url.replace(/^ws/, 'http').replace(/\/+$/, '');
+  }
+
+  function EonNet(opt) {
+    Bus.call(this);
+    this.opt = opt || {};
+    this.url = (this.opt.url || '').replace(/\/+$/, '');
+    this.http = httpBase(this.url);
+    this.game = this.opt.game || 'game';
+    this.build = String(this.opt.build || '0');
+    this.name = this.opt.name || 'PLAYER';
+    this.input = this.opt.input || (matchMedia && matchMedia('(pointer:coarse)').matches ? 'touch' : 'pointer');
+    this.ice = this.opt.iceServers || DEF_ICE;
+    this.relayAfterMs = this.opt.relayAfterMs || 6000;
+
+    this.ws = null;
+    this.code = null;
+    this.me = null;
+    this.token = null;
+    this.lobby = null;
+    this.peers = {};          // id -> {pc, r, u, relay, state}
+    this.closed = false;
+    this._retry = 0;
+    this._hb = 0;
+    this._wantOpen = false;
+  }
+  EonNet.prototype = Object.create(Bus.prototype);
+  EonNet.prototype.constructor = EonNet;
+
+  /* ---- REST: list / create / quick ---------------------------------- */
+  EonNet.prototype._get = function (path, q) {
+    var u = this.http + path + '?game=' + encodeURIComponent(this.game);
+    for (var k in q) if (q[k] != null && q[k] !== '') u += '&' + k + '=' + encodeURIComponent(q[k]);
+    return fetch(u, { method: 'GET' }).then(readJson);
+  };
+  EonNet.prototype._post = function (path, body) {
+    return fetch(this.http + path + '?game=' + encodeURIComponent(this.game), {
+      method: 'POST', body: JSON.stringify(body || {})
+    }).then(readJson);
+  };
+
+  /** Browse public lobbies. Always filtered to this build. */
+  EonNet.prototype.list = function (o) {
+    o = o || {};
+    return this._get('/api/lobbies', {
+      mode: o.mode, build: this.build,
+      inputClass: o.inputClass || (o.anyInput ? '' : this.input)
+    }).then(function (j) { return (j && j.lobbies) || []; });
+  };
+
+  /** Create a lobby. Returns the code. Does not join — call join(code). */
+  EonNet.prototype.createLobby = function (o) {
+    o = o || {};
+    return this._post('/api/create', {
+      mode: o.mode || 'solo-sim',
+      build: this.build,
+      visibility: o.visibility || 'public',
+      /* separate-by-input is the DEFAULT; pass 'mixed' deliberately */
+      inputClass: o.inputClass || this.input,
+      maxPlayers: o.maxPlayers,
+      region: o.region, name: o.name
+    }).then(function (j) {
+      if (j.type !== 'created') throw new Error(j.code || 'create_failed');
+      return j.code;
+    });
+  };
+
+  /** Join the best open lobby for this mode, or create one. */
+  EonNet.prototype.quick = function (o) {
+    o = o || {};
+    var self = this;
+    return this._post('/api/quick', {
+      mode: o.mode || 'solo-sim', build: this.build,
+      inputClass: o.inputClass || this.input,
+      maxPlayers: o.maxPlayers, region: o.region
+    }).then(function (j) {
+      if (!j.code) throw new Error(j.code || 'quick_failed');
+      return self.join(j.code).then(function () { return j; });
+    });
+  };
+
+  /* ---- lobby socket -------------------------------------------------- */
+  EonNet.prototype.join = function (code, opt) {
+    var self = this;
+    opt = opt || {};
+    this.code = String(code || '').toUpperCase();
+    this.closed = false;
+    this._wantOpen = true;
+    /* reuse a held slot if we were here before (page refresh, phone lock) */
+    this.token = this._loadToken(this.code);
+
+    return new Promise(function (res, rej) {
+      /* Held on the instance, not in the socket closure: an automatic
+         reconnect opens a NEW socket, and the caller still awaiting join()
+         must be settled by whichever attempt finally succeeds. */
+      self._pending = { res: res, rej: rej };
+      clearTimeout(self._joinTimer);
+      self._joinTimer = setTimeout(function () {
+        /* never leave a game stuck on a loading screen */
+        self._settle(false, new Error('join_timeout'));
+        self._wantOpen = false;
+        try { self.ws && self.ws.close(); } catch (e) { }
+      }, opt.timeout || 20000);
+
+      self._openSocket();
+    });
+  };
+
+  EonNet.prototype._settle = function (ok, val) {
+    var p = this._pending;
+    if (!p) return;
+    this._pending = null;
+    clearTimeout(this._joinTimer);
+    if (ok) p.res(val); else p.rej(val);
+  };
+
+  EonNet.prototype._sessKey = function (code) { return 'eonnet:' + this.game + ':' + code; };
+  EonNet.prototype._loadToken = function (code) {
+    try { return sessionStorage.getItem(this._sessKey(code)) || null; } catch (e) { return null; }
+  };
+  EonNet.prototype._saveToken = function (t) {
+    try { sessionStorage.setItem(this._sessKey(this.code), t); } catch (e) { }
+  };
+
+  EonNet.prototype._openSocket = function () {
+    var self = this;
+    var q = '?game=' + encodeURIComponent(this.game) +
+      '&code=' + encodeURIComponent(this.code) +
+      '&build=' + encodeURIComponent(this.build) +
+      '&name=' + encodeURIComponent(this.name) +
+      '&input=' + encodeURIComponent(this.input) +
+      (this.token ? '&token=' + encodeURIComponent(this.token) : '');
+
+    var ws;
+    try { ws = new WebSocket(this.url + '/ws' + q); }
+    catch (e) { return this._settle(false, e); }
+    this.ws = ws;
+
+    ws.onopen = function () { self._retry = 0; };
+
+    ws.onmessage = function (ev) {
+      var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      self._onMsg(m);
+    };
+
+    ws.onerror = function () { /* close handler decides what to do */ };
+
+    ws.onclose = function (e) {
+      clearInterval(self._hb);
+      self.emit('disconnected', { code: e.code, reason: e.reason });
+      /* 4xxx = the server refused us on purpose (full, wrong build, no such
+         lobby, rate limited). Retrying can never succeed, so stop and tell
+         the game instead of looping silently forever. */
+      if (e.code >= 4000 && e.code < 5000) {
+        self._wantOpen = false;
+        self._settle(false, new Error(self._fatal || e.reason || 'refused'));
+        return;
+      }
+      if (self.closed || !self._wantOpen) return;
+      var wait = Math.min(8000, 400 * Math.pow(2, self._retry++));
+      setTimeout(function () { if (!self.closed && self._wantOpen) self._openSocket(); }, wait);
+    };
+  };
+
+  EonNet.prototype._onMsg = function (m) {
+    var self = this;
+    switch (m.type) {
+      case 'welcome':
+        this.me = m.you;
+        this.token = m.token;
+        this._saveToken(m.token);
+        this.lobby = m.lobby;
+        clearInterval(this._hb);
+        this._hb = setInterval(function () { self._send({ type: 'ping', t: now() }); }, 25000);
+        this.emit('lobby', this.lobby);
+        this.emit('joined', { you: this.me, rejoined: !!m.rejoined, lobby: m.lobby });
+        this._syncPeers();
+        this._settle(true, this.lobby);
+        break;
+
+      case 'lobby':
+        this.lobby = m.lobby;
+        this.emit('lobby', m.lobby);
+        this._syncPeers();
+        break;
+
+      case 'begin':
+        this.lobby = m.lobby || this.lobby;
+        this.emit('begin', m);
+        break;
+
+      /* host migration — you are now the authority, here is the last keyframe */
+      case 'authority':
+        this.lobby = m.lobby || this.lobby;
+        this.emit('lobby', this.lobby);
+        this.emit('authority', { snapshot: m.snapshot, lobby: this.lobby });
+        break;
+
+      case 'peerGone':
+        this._dropPeer(m.id);
+        this.lobby = m.lobby || this.lobby;
+        this.emit('peerGone', m);
+        this.emit('lobby', this.lobby);
+        break;
+
+      case 'signal':
+        this._onSignal(m.from, m.data);
+        break;
+
+      case 'relay':
+        if (m.data && m.data.__eon === 'relay') { this._useRelay(m.from); break; }
+        this.emit('data', m.data, m.from);
+        break;
+
+      case 'pong':
+        this.rtt = now() - (m.t || now());
+        break;
+
+      case 'error':
+        this.emit('error', m);
+        if (m.fatal) {                 /* server will close right after this */
+          this._fatal = m.code;
+          this._wantOpen = false;
+          this._settle(false, new Error(m.code));
+        }
+        break;
+    }
+  };
+
+  EonNet.prototype._send = function (o) {
+    if (this.ws && this.ws.readyState === 1) { this.ws.send(JSON.stringify(o)); return true; }
+    return false;
+  };
+
+  /* ---- lobby actions -------------------------------------------------- */
+  EonNet.prototype.ready = function (v) { this._send({ type: 'ready', ready: v !== false }); };
+  EonNet.prototype.setName = function (n) { this.name = n; this._send({ type: 'setName', name: n }); };
+  EonNet.prototype.start = function (setup) { this._send({ type: 'start', setup: setup || null }); };
+  EonNet.prototype.endMatch = function () { this._send({ type: 'endMatch' }); };
+  /** authority only: cache a keyframe so a promoted player can resume */
+  EonNet.prototype.snap = function (str, frame) { this._send({ type: 'snap', data: String(str), frame: frame | 0 }); };
+
+  EonNet.prototype.isAuthority = function () {
+    if (!this.lobby || !this.me) return false;
+    for (var i = 0; i < this.lobby.players.length; i++) {
+      if (this.lobby.players[i].id === this.me) return !!this.lobby.players[i].authority;
+    }
+    return false;
+  };
+
+  EonNet.prototype.leave = function () {
+    this.closed = true; this._wantOpen = false;
+    clearInterval(this._hb);
+    this._send({ type: 'leave' });
+    for (var id in this.peers) this._dropPeer(id);
+    try { this.ws && this.ws.close(1000, 'leave'); } catch (e) { }
+    this.ws = null;
+  };
+
+  /* ---- peer mesh ------------------------------------------------------ */
+  EonNet.prototype._syncPeers = function () {
+    if (!this.lobby || !this.me) return;
+    var live = {};
+    var ps = this.lobby.players || [];
+    for (var i = 0; i < ps.length; i++) {
+      var p = ps[i];
+      if (p.id === this.me || !p.connected) continue;
+      live[p.id] = 1;
+      var ex = this.peers[p.id];
+      if (!ex) { this._makePeer(p.id, this.me < p.id); continue; }  /* deterministic offerer */
+      /* health check: an entry can exist while its connection is dead, which
+         no event ever reports. Rebuild rather than leaving it stuck. */
+      if (!ex.relay && ex.pc && (ex.pc.connectionState === 'closed' || ex.pc.connectionState === 'failed')) {
+        this._dropPeer(p.id);
+        this._makePeer(p.id, this.me < p.id);
+      }
+    }
+    for (var id in this.peers) if (!live[id]) this._dropPeer(id);
+  };
+
+  EonNet.prototype._makePeer = function (id, polite) {
+    var self = this;
+    var pc;
+    try { pc = new RTCPeerConnection({ iceServers: this.ice }); }
+    catch (e) { this._useRelay(id); return; }
+
+    var P = this.peers[id] = { pc: pc, r: null, u: null, relay: false, open: false, queue: [] };
+
+    pc.onicecandidate = function (e) {
+      if (e.candidate) self._send({ type: 'signal', to: id, data: { ice: e.candidate } });
+    };
+    pc.onconnectionstatechange = function () {
+      var st = pc.connectionState;
+      if (st === 'failed' || st === 'closed') self._useRelay(id);
+      else if (st === 'disconnected') {
+        /* real networks sit in 'disconnected' indefinitely without ever
+           reaching 'failed'. Give it a moment, then fall back. */
+        clearTimeout(P.discT);
+        P.discT = setTimeout(function () {
+          if (pc.connectionState === 'disconnected') self._useRelay(id);
+        }, 4000);
+      } else clearTimeout(P.discT);
+    };
+    pc.ondatachannel = function (e) { self._bindChannel(id, e.channel); };
+
+    if (polite) {
+      /* reliable+ordered for events, unreliable+unordered for state/input */
+      this._bindChannel(id, pc.createDataChannel('r', { ordered: true }));
+      this._bindChannel(id, pc.createDataChannel('u', { ordered: false, maxRetransmits: 0 }));
+      pc.createOffer().then(function (o) {
+        return pc.setLocalDescription(o);
+      }).then(function () {
+        self._send({ type: 'signal', to: id, data: { sdp: pc.localDescription } });
+      }).catch(function () { self._useRelay(id); });
+    }
+
+    /* if we can't get a direct path in time, fall back to the lobby relay */
+    P.timer = setTimeout(function () { if (!P.open) self._useRelay(id); }, this.relayAfterMs);
+  };
+
+  EonNet.prototype._bindChannel = function (id, ch) {
+    var self = this, P = this.peers[id];
+    if (!P) return;
+    P[ch.label === 'u' ? 'u' : 'r'] = ch;
+    ch.binaryType = 'arraybuffer';
+    ch.onopen = function () {
+      if (P.open) return;
+      P.open = true;
+      clearTimeout(P.timer);
+      var q = P.queue; P.queue = [];
+      for (var i = 0; i < q.length; i++) self.sendTo(id, q[i].d, q[i].u);
+      self.emit('peer', { id: id, transport: 'p2p' });
+    };
+    ch.onmessage = function (e) {
+      var d = e.data;
+      if (typeof d === 'string') { try { d = JSON.parse(d); } catch (x) { } }
+      self.emit('data', d, id);
+    };
+    ch.onclose = function () { if (P.open && !P.relay) self._useRelay(id); };
+  };
+
+  EonNet.prototype._onSignal = function (from, data) {
+    var self = this;
+    var P = this.peers[from];
+    if (!P) { this._makePeer(from, false); P = this.peers[from]; }
+    if (!P || !P.pc) return;
+    var pc = P.pc;
+
+    if (data.sdp) {
+      pc.setRemoteDescription(data.sdp).then(function () {
+        if (data.sdp.type !== 'offer') return null;
+        return pc.createAnswer().then(function (a) {
+          return pc.setLocalDescription(a);
+        }).then(function () {
+          self._send({ type: 'signal', to: from, data: { sdp: pc.localDescription } });
+        });
+      }).catch(function () { self._useRelay(from); });
+    } else if (data.ice) {
+      pc.addIceCandidate(data.ice).catch(function () { });
+    }
+  };
+
+  EonNet.prototype._useRelay = function (id) {
+    var P = this.peers[id] || (this.peers[id] = { queue: [] });
+    if (P.relay) return;
+    P.relay = true; P.open = true;
+    clearTimeout(P.timer); clearTimeout(P.discT);
+    try { P.pc && P.pc.close(); } catch (e) { }
+    P.pc = null; P.r = null; P.u = null;
+    /* tell the other side too, so it stops waiting on a channel we abandoned */
+    this._send({ type: 'relay', to: id, data: { __eon: 'relay' } });
+    var q = P.queue || []; P.queue = [];
+    for (var i = 0; i < q.length; i++) this.sendTo(id, q[i].d, q[i].u);
+    this.emit('peer', { id: id, transport: 'relay' });
+  };
+
+  EonNet.prototype._dropPeer = function (id) {
+    var P = this.peers[id];
+    if (!P) return;
+    clearTimeout(P.timer); clearTimeout(P.discT);
+    try { P.r && P.r.close(); } catch (e) { }
+    try { P.u && P.u.close(); } catch (e) { }
+    try { P.pc && P.pc.close(); } catch (e) { }
+    delete this.peers[id];
+  };
+
+  /* ---- data plane ------------------------------------------------------ */
+  /** Send to one peer. `unreliable` = drop rather than delay (inputs/state). */
+  EonNet.prototype.sendTo = function (id, data, unreliable) {
+    var P = this.peers[id];
+    if (!P) return false;
+    if (P.relay) return this._send({ type: 'relay', to: id, data: data });
+    var ch = unreliable ? (P.u || P.r) : P.r;
+    if (ch && ch.readyState === 'open') {
+      try { ch.send(typeof data === 'string' ? data : JSON.stringify(data)); return true; }
+      catch (e) { this.emit('error', { code: 'send_failed', peer: id }); return false; }
+    }
+    /* unreliable traffic is per-frame state: dropping it is correct, and
+       queueing it would deliver a stale burst the moment the channel opens */
+    if (unreliable) return false;
+    var q = P.queue || (P.queue = []);
+    if (q.length >= 64) q.shift();          /* bounded: never grow forever */
+    q.push({ d: data, u: unreliable });
+    return false;
+  };
+
+  EonNet.prototype.broadcast = function (data, unreliable) {
+    var n = 0;
+    for (var id in this.peers) if (this.sendTo(id, data, unreliable)) n++;
+    return n;
+  };
+
+  EonNet.prototype.transportOf = function (id) {
+    var P = this.peers[id];
+    return !P ? 'none' : (P.relay ? 'relay' : (P.open ? 'p2p' : 'connecting'));
+  };
+
+  root.EonNet = {
+    PROTO: PROTO,
+    create: function (opt) { return new EonNet(opt); },
+    MODES: { '1v1': 2, 'coop': 4, 'solo-sim': 8, 'team-sim': 8 }
+  };
+})(typeof window !== 'undefined' ? window : globalThis);
+
+</script>
+<script>
+/* ===========================================================================
+   SCNet — deterministic rollback netcode for Signal Clash 1v1
+   ---------------------------------------------------------------------------
+   Both peers run the identical simulation. The ONLY thing that crosses the
+   wire during a fight is one byte of buttons per frame per player.
+
+   How a frame works:
+     1. read local buttons, schedule them DELAY frames ahead, send them
+     2. if a remote input arrived that contradicts what we guessed, rewind to
+        that frame and replay forward (invisibly, inside this same frame)
+     3. step one frame, guessing the opponent still holds what they held last
+
+   Everything the simulation touches is saved before each step, so rewinding
+   is exact. Cosmetics (particles, sound, announcements) are suppressed while
+   replaying, because those frames already happened once.
+   ========================================================================= */
+const SCNet = (function () {
+
+  const DELAY = 2;          // frames of input delay; hides ~33ms of lag
+  const MAX_AHEAD = 9;      // never run further than this ahead of the opponent
+  const SAVE = 24;          // saved states (must exceed MAX_AHEAD + DELAY)
+  const RING = 256;         // input / prediction history
+  const CHECK_EVERY = 30;   // frames between desync checksums
+
+  const IN_KEYS = ['l', 'r', 'u', 'd', 'a', 's', 'k', 'f'];
+  const tmpIn = { l: 0, r: 0, u: 0, d: 0, a: 0, s: 0, k: 0, f: 0 };
+  const tmpIn2 = { l: 0, r: 0, u: 0, d: 0, a: 0, s: 0, k: 0, f: 0 };
+
+  function pack(i) {
+    return (i.l ? 1 : 0) | (i.r ? 2 : 0) | (i.u ? 4 : 0) | (i.d ? 8 : 0) |
+      (i.a ? 16 : 0) | (i.s ? 32 : 0) | (i.k ? 64 : 0) | (i.f ? 128 : 0);
+  }
+  function unpack(b, o) {
+    o.l = b & 1 ? 1 : 0; o.r = b & 2 ? 1 : 0; o.u = b & 4 ? 1 : 0; o.d = b & 8 ? 1 : 0;
+    o.a = b & 16 ? 1 : 0; o.s = b & 32 ? 1 : 0; o.k = b & 64 ? 1 : 0; o.f = b & 128 ? 1 : 0;
+    return o;
+  }
+
+  /* ---- state capture -----------------------------------------------------
+     Skipped keys are either immutable shared references (the character
+     definition, its sprite atlas, body metrics) or pure render state that is
+     re-derived every frame from st/anim/animT. Everything else is captured,
+     including fields the current build never reads, so that a future change
+     cannot silently fall outside the snapshot. */
+  const SKIP_F = {
+    def: 1, atlas: 1, m: 1, stanceOff: 1, pose: 1, blendPose: 1,
+    trX: 1, trY: 1, trN: 1, trFade: 1, core: 1, mods: 1
+  };
+  const GKEYS = ['phase', 'phaseT', 'timer', 'round', 'w1', 'w2', 'camX', 'camTarget',
+    'fade', 'running', 'survT', 'oppIdx', 'travelT', 'pathOff', 'swapped',
+    'hpCarry', 'lagHp1', 'lagHp2'];
+
+  function saveF(f) {
+    const o = {};
+    for (const k in f) {
+      if (SKIP_F[k]) continue;
+      const v = f[k];
+      if (v === null || typeof v !== 'object') o[k] = v;
+      else if (k === 'move') o[k] = v;                 // MOVES table reference
+      else if (Array.isArray(v)) o[k] = v.slice();
+      else o[k] = Object.assign({}, v);
+    }
+    return o;
+  }
+  function loadF(f, o) {
+    for (const k in o) {
+      const v = o[k];
+      if (v === null || typeof v !== 'object' || k === 'move') { f[k] = v; continue; }
+      const t = f[k];
+      if (Array.isArray(v)) {
+        if (Array.isArray(t)) { t.length = 0; for (let i = 0; i < v.length; i++) t.push(v[i]); }
+        else f[k] = v.slice();
+      } else if (t && typeof t === 'object' && !Array.isArray(t)) {
+        for (const kk in t) delete t[kk];
+        Object.assign(t, v);
+      } else f[k] = Object.assign({}, v);
+    }
+  }
+
+  function saveState() {
+    const g = Game, o = { p1: saveF(g.p1), p2: saveF(g.p2), g: {}, hs: FX.hitStop, rng: simRnd.get() };
+    for (let i = 0; i < GKEYS.length; i++) o.g[GKEYS[i]] = g[GKEYS[i]];
+    o.stats = Object.assign({}, g.stats);
+    return o;
+  }
+  function loadState(s) {
+    loadF(Game.p1, s.p1); loadF(Game.p2, s.p2);
+    for (let i = 0; i < GKEYS.length; i++) Game[GKEYS[i]] = s.g[GKEYS[i]];
+    Game.stats = Object.assign({}, s.stats);
+    FX.hitStop = s.hs; simRnd.set(s.rng);
+  }
+
+  /* checksum of everything that can change the outcome of the fight */
+  function fnv(str) {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    return h >>> 0;
+  }
+  function stateStr() {
+    const a = Game.p1, b = Game.p2;
+    if (!a || !b) return '';
+    let s = '';
+    for (const f of [a, b]) {
+      s += f.x + ',' + f.y + ',' + f.vx + ',' + f.vy + ',' + f.dir + ',' + f.hp + ',' +
+        f.st + ',' + f.t + ',' + f.moveName + ',' + f.moveT + ',' + f.hitDone + ',' +
+        f.blocking + ',' + f.crouch + ',' + f.air + ',' + f.stun + ',' + f.blockStun + ',' +
+        f.knockT + ',' + f.invuln + ',' + f.combo + ',' + f.comboT + ',' + f.chainCount + ',' +
+        f.chainOK + ',' + f.juggle + ',' + f.pushV + ',' + f.bufMove + ',' + f.bufT + ',' +
+        f.gadget + ',' + f.autoGuard + ',' + f.sigName + ',' + f.chainSeq.join('.') + ';';
+    }
+    return s + Game.phase + ',' + Game.timer + ',' + Game.round + ',' + Game.w1 + ',' +
+      Game.w2 + ',' + FX.hitStop + ',' + simRnd.get();
+  }
+
+  const S = {
+    /* ---- public flags read by the patched game code ----
+       online : netplay RULES apply (synced guard, locked arena). Set before
+                the match is constructed, because Game.startMatch() calls
+                applyGuard() while building the fighters.
+       active : the netcode is DRIVING frames. Set only once the match exists,
+                or frameStep would run against a half-built match. */
+    online: false,
+    active: false,
+    resim: false,
+    setup: {},
+
+    net: null, side: 0, peerId: null, code: null,
+    solo: false,          // no peer attached: local verification / practice
+    frame: 0,
+    inp: [[], []],
+    used: new Array(RING),
+    hashes: new Array(RING),
+    states: new Array(SAVE),
+    lastRemote: -1, lastRemoteByte: 0,
+    lastContig: -1,        // highest frame with NO gap before it
+    pending: [],           // checksums waiting for their frame to be confirmed
+    ticks: 0,              // frameStep calls; advances even while stalled
+    nackAt: -1,            // throttle for repair requests (in ticks, NOT frames)
+    lastCheck: -1,
+    rbFrom: -1,
+    rollbacks: 0, rbFrames: 0, stalls: 0, desyncs: 0, maxRb: 0,
+    onEnd: null, onDesync: null,
+
+    reset() {
+      this.frame = 0;
+      this.inp = [[], []];
+      this.used = new Array(RING);
+      this.hashes = new Array(RING);
+      this.states = new Array(SAVE);
+      this.lastRemote = -1; this.lastRemoteByte = 0;
+      this.lastContig = -1; this.nackAt = -1; this.pending = []; this.lastCheck = -1;
+      this.ticks = 0;
+      this.rbFrom = -1;
+      this.rollbacks = 0; this.rbFrames = 0; this.stalls = 0; this.desyncs = 0; this.maxRb = 0;
+    },
+
+    /* ---------------- inbound from the peer ---------------- */
+    onData(d) {
+      if (!d || !this.active) return;
+      if (d.t === 'i') {
+        /* inputs are sent with redundancy: a lost packet is covered by the
+           next one, so we never wait for a retransmit */
+        const f0 = d.f - (d.b.length - 1);
+        for (let i = 0; i < d.b.length; i++) this.onRemote(f0 + i, d.b[i]);
+      } else if (d.t === 'n') {
+        /* the peer is missing a run of our inputs and asked for them again.
+           Redundancy alone cannot cover a burst longer than the window, and
+           there is no retransmit in the transport, so answer explicitly. */
+        const end = Math.min(d.f + 23, this.inp[this.side].length - 1);
+        const bs = [];
+        for (let f = d.f; f <= end; f++) bs.push(this.inp[this.side][f] === undefined ? 0 : this.inp[this.side][f]);
+        if (bs.length) this.send({ t: 'i', f: end, b: bs });
+      } else if (d.t === 'c') {
+        /* Only compare a frame whose remote inputs are all known locally.
+           A frame we might still roll back is not final, and comparing it
+           reports desyncs that do not exist. */
+        if (d.f <= this.lastContig) this.compare(d.f, d.h);
+        else {
+          this.pending.push(d);
+          if (this.pending.length > 16) this.pending.shift();
+        }
+      }
+    },
+
+    compare(f, h) {
+      const mine = this.hashes[f % RING];
+      if (!mine || mine.f !== f) return;        // rolled out of the ring
+      if (mine.h === h) return;
+      this.desyncs++;
+      if (this.onDesync) this.onDesync(f, mine.h, h);
+    },
+
+    drainPending() {
+      if (!this.pending.length) return;
+      for (let i = this.pending.length - 1; i >= 0; i--) {
+        const d = this.pending[i];
+        if (d.f <= this.lastContig) { this.compare(d.f, d.h); this.pending.splice(i, 1); }
+        else if (this.frame - d.f > 240) this.pending.splice(i, 1);   // never confirmed
+      }
+    },
+
+    onRemote(f, b) {
+      if (f < 0) return;
+      const arr = this.inp[1 - this.side];
+      if (arr[f] !== undefined) return;
+      arr[f] = b;
+      if (f > this.lastRemote) { this.lastRemote = f; this.lastRemoteByte = b; }
+      /* advance the no-gap watermark */
+      const rem = this.inp[1 - this.side];
+      while (rem[this.lastContig + 1] !== undefined) this.lastContig++;
+      if (f < this.frame) {
+        const u = this.used[f % RING];
+        /* only rewind if what actually happened differs from what we guessed */
+        if (u && u.f === f && u.b !== b && (this.rbFrom < 0 || f < this.rbFrom)) this.rbFrom = f;
+      }
+    },
+
+    send(o) {
+      if (this.net && this.peerId) this.net.sendTo(this.peerId, o, true);
+    },
+
+    /* ---------------- one displayed frame ---------------- */
+    frameStep() {
+      if (!this.active) return;
+      this.ticks++;
+      const G = Game;
+      if (!G.running) { this.finish(); return; }
+      if (G.paused) {                         // a local pause would desync
+        G.paused = false;
+        if (UI.cur === 'pause') { UI.hideAll(); UI.announce('NO PAUSE ONLINE', false); }
+      }
+
+      /* 1. local buttons, scheduled DELAY frames into the future */
+      const tf = this.frame + DELAY;
+      const mine = this.inp[this.side];
+      if (mine[tf] === undefined) {
+        mine[tf] = pack(Input.poll());
+        const bs = [];
+        for (let f = Math.max(0, tf - 11); f <= tf; f++) bs.push(mine[f] === undefined ? 0 : mine[f]);
+        this.send({ t: 'i', f: tf, b: bs });
+      }
+
+      /* 2. correct any mispredicted past */
+      if (this.rbFrom >= 0 && this.rbFrom < this.frame) this.rollback();
+
+      /* 3. repair and keepalive — BEFORE the stall check, deliberately.
+            A stalled peer stops advancing, so it stops scheduling new inputs,
+            so it stops sending. Two peers that stall at the same moment would
+            then sit waiting for each other forever. While stalled we keep
+            re-sending our newest window and asking for the hole to be filled,
+            which is what breaks the deadlock. */
+      const stalled = !this.solo && this.frame - this.lastRemote > MAX_AHEAD;
+      const holed = !this.solo && this.frame - this.lastContig > 12;
+      if ((stalled || holed) && this.ticks - this.nackAt > 10) {
+        this.nackAt = this.ticks;
+        if (this.lastContig < this.frame - 1) this.send({ t: 'n', f: this.lastContig + 1 });
+        const rf = this.frame + DELAY, rb = [];
+        for (let f = Math.max(0, rf - 11); f <= rf; f++) rb.push(this.inp[this.side][f] === undefined ? 0 : this.inp[this.side][f]);
+        this.send({ t: 'i', f: rf, b: rb });
+      }
+      if (stalled) { this.stalls++; return; }
+
+      /* 4. advance */
+      this.stepOne();
+
+      /* 5. periodic agreement check, on the newest FULLY CONFIRMED frame */
+      this.drainPending();
+      const cf = Math.min(this.lastContig, this.frame - 1);
+      if (cf > 0 && cf !== this.lastCheck && cf % CHECK_EVERY === 0) {
+        this.lastCheck = cf;
+        const h = this.hashes[cf % RING];
+        if (h && h.f === cf) this.send({ t: 'c', f: cf, h: h.h });
+      }
+    },
+
+    stepOne() {
+      const f = this.frame;
+      this.states[f % SAVE] = { f: f, s: saveState() };
+
+      const localB = this.inp[this.side][f];
+      let remoteB = this.inp[1 - this.side][f];
+      if (remoteB === undefined) {
+        if (this.solo) { remoteB = 0; this.inp[1 - this.side][f] = 0; this.lastRemote = f; }
+        else remoteB = this.lastRemoteByte;                       // predict: still held
+      }
+      this.used[f % RING] = { f: f, b: remoteB };
+
+      const a = unpack(localB === undefined ? 0 : localB, tmpIn);
+      const b = unpack(remoteB, tmpIn2);
+      if (this.side === 0) { Game.p1.setInput(a); Game.p2.setInput(b); }
+      else { Game.p1.setInput(b); Game.p2.setInput(a); }
+
+      Game.step(CFG.DT);
+      this.frame = f + 1;
+      this.hashes[f % RING] = { f: f, h: fnv(stateStr()) };
+    },
+
+    rollback() {
+      const target = this.rbFrom;
+      this.rbFrom = -1;
+      const slot = this.states[target % SAVE];
+      if (!slot || slot.f !== target) {           // older than our history
+        this.desyncs++;
+        if (this.onDesync) this.onDesync(target, 0, 0);
+        return;
+      }
+      const to = this.frame;
+      loadState(slot.s);
+      this.frame = target;
+
+      this.resim = true;
+      const sndOk = Snd.ok; Snd.ok = false;       // do not replay sound
+      try { while (this.frame < to) this.stepOne(); }
+      finally { this.resim = false; Snd.ok = sndOk; }
+
+      const n = to - target;
+      this.rollbacks++; this.rbFrames += n;
+      if (n > this.maxRb) this.maxRb = n;
+    },
+
+    /* ---------------- lifecycle ---------------- */
+    /* every field is validated: `setup` arrives from the other machine, and a
+       bad index here used to throw deep inside Game.startMatch, AFTER the
+       online flag and the arena lock were set, leaving both stuck on for the
+       rest of the session and corrupting every later OFFLINE match */
+    validate(su) {
+      const n = ROSTER.length, sn = STAGE_DEFS.length;
+      const ix = (v, max) => (Number.isInteger(v) && v >= 0 && v < max) ? v : 0;
+      const num = (v, d) => (typeof v === 'number' && isFinite(v) && v > 0) ? v : d;
+      return {
+        p1: ix(su && su.p1, n), p2: ix(su && su.p2, n), stage: ix(su && su.stage, sn),
+        autoGuard: !!(su && su.autoGuard),
+        ground: num(su && su.ground, VIEWS.landscape.GROUND),
+        arena: num(su && su.arena, VIEWS.landscape.ARENA)
+      };
+    },
+
+    startMatch(setup, seed, side, peerId, net) {
+      setup = this.validate(setup);
+      try {
+        this._start(setup, seed, side, peerId, net);
+      } catch (e) {
+        /* leave nothing switched on: a failed online start must not change how
+           the offline game behaves afterwards */
+        this.active = false; this.online = false; this.solo = false;
+        try { unlockArena(); } catch (e2) { }
+        try { Game.running = false; } catch (e2) { }
+        console.error('[scnet] match start failed', e);
+        if (this.onError) this.onError(e);
+        throw e;
+      }
+    },
+
+    _start(setup, seed, side, peerId, net) {
+      this.setup = setup; this.side = side; this.peerId = peerId; this.net = net;
+      this.solo = !net || !peerId;
+      this.online = true;                       // must precede Game.startMatch
+      seedSim(seed >>> 0);
+      lockArena(setup.ground, setup.arena);
+
+      UI.enterMatchUI();
+      UI.mode = 'match';
+      Game.startMatch(setup.p1, setup.p2, setup.stage, 'medium');
+
+      /* The AI is gone: the remote player writes into p2 through exactly the
+         same setInput() the AI used. Its difficulty damage multiplier goes
+         with it, or p2 would hit for a different amount than p1. */
+      Game.ai = null;
+      const d2 = ROSTER[setup.p2];
+      Game.p2.mods = d2.mods || { speed: 1, dmg: 1, punch: 1, kick: 1, weight: 1, health: 1 };
+      Game.applyGuard();
+
+      this.reset();
+      this.active = true;
+      UI.afterStart();
+    },
+
+    finish() {
+      if (!this.active) return;
+      this.active = false; this.online = false;
+      unlockArena();
+      if (this.onEnd) this.onEnd();
+    },
+
+    quit() {
+      if (this.online) { this.active = false; this.online = false; unlockArena(); }
+      Game.running = false;
+    },
+
+    hash() { return fnv(stateStr()); },
+
+    stats() {
+      return {
+        active: this.active, online: this.online, side: this.side, frame: this.frame,
+        remote: this.lastRemote, ahead: this.frame - this.lastRemote,
+        rollbacks: this.rollbacks, rbFrames: this.rbFrames, maxRb: this.maxRb,
+        stalls: this.stalls, desyncs: this.desyncs, contig: this.lastContig,
+        avgRb: this.rollbacks ? +(this.rbFrames / this.rollbacks).toFixed(2) : 0
+      };
+    },
+
+    /* exposed for the harness */
+    _pack: pack, _saveState: saveState, _loadState: loadState, _stateStr: stateStr
+  };
+
+  return S;
+})();
+window.SCNet = SCNet;
+
+</script>
+<script>
+/* ===========================================================================
+   Online lobby overlay for Signal Clash.
+   Entirely additive: its own DOM, its own stylesheet, its own z-layer. It
+   does not modify a single existing screen, so nothing offline can regress.
+   ========================================================================= */
+(function () {
+  const NET_BUILD = '1.21';
+  const DEF_URL = 'wss://eonnet.eons2eons1.workers.dev';
+
+  function serverUrl() {
+    try {
+      const q = new URLSearchParams(location.search).get('net');
+      if (q) return q;
+    } catch (e) { }
+    return window.EONNET_URL || DEF_URL;
+  }
+
+  const CSS = `
+#scnet,#scnet *{box-sizing:border-box}
+#scnet .snCard,#scnet .snRow{height:auto;width:auto;transform:none;box-shadow:none}
+#scnet{position:fixed;inset:0;z-index:2147483700;display:none;background:rgba(4,7,15,.92);
+  backdrop-filter:blur(3px);color:#dbe7f5;font:14px/1.45 ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif;
+  overflow:auto;-webkit-overflow-scrolling:touch}
+#scnet.on{display:block}
+#scnet .snWrap{max-width:660px;margin:0 auto;padding:18px 16px 40px}
+#scnet h3{font-size:15px;letter-spacing:.14em;text-transform:uppercase;margin:0 0 14px;color:#7fe3ff;font-weight:600}
+#scnet h4{font-size:11px;letter-spacing:.14em;text-transform:uppercase;opacity:.55;margin:16px 0 7px;font-weight:600}
+#scnet .snCard{background:#0b131f;border:1px solid #1e2c3e;border-radius:10px;padding:12px;margin-bottom:12px}
+#scnet .snRow{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+#scnet .snRow:last-child{margin-bottom:0}
+#scnet button{background:linear-gradient(#22364f,#141d2b);color:#dfeaf8;border:1px solid #35506c;
+  padding:9px 14px;border-radius:8px;cursor:pointer;font-size:13px;font-family:inherit;letter-spacing:.04em}
+#scnet button:hover:not(:disabled){border-color:#4e83ad;color:#fff}
+#scnet button:disabled{opacity:.35;cursor:default}
+#scnet button.go{background:linear-gradient(#1d6f8c,#12455a);border-color:#3fa5c7;color:#eaffff}
+#scnet button.warn{background:linear-gradient(#5c2733,#3a161e);border-color:#8a3d4d}
+#scnet input,#scnet select{background:#060c15;border:1px solid #26374b;color:#dbe7f5;padding:8px 9px;
+  border-radius:7px;font-size:13px;font-family:inherit}
+#scnet input#scnCode{text-transform:uppercase;letter-spacing:.24em;width:112px;text-align:center}
+#scnet label{font-size:12px;opacity:.72;display:flex;gap:6px;align-items:center}
+#scnet table{width:100%;border-collapse:collapse;font-size:13px}
+#scnet th,#scnet td{text-align:left;padding:6px 5px;border-bottom:1px solid #182432}
+#scnet th{font-size:10px;letter-spacing:.1em;text-transform:uppercase;opacity:.45;font-weight:600}
+#scnet .snTag{display:inline-block;padding:1px 7px;border-radius:99px;font-size:10.5px;border:1px solid #35506c;letter-spacing:.06em}
+#scnet .snOk{color:#7ee38b;border-color:#2e5c39}
+#scnet .snHot{color:#ffce6b;border-color:#6b5424}
+#scnet .snBad{color:#ff8f8f;border-color:#6b2f2f}
+#scnet .snMsg{font-size:12.5px;opacity:.7;min-height:18px;margin-top:6px}
+#scnet .snX{position:absolute;top:12px;right:14px;background:none;border:0;font-size:22px;
+  color:#8fa6bd;cursor:pointer;padding:4px 10px}
+#scnet code{background:#060c15;padding:2px 7px;border-radius:5px;letter-spacing:.2em}
+#scnet .snShare{background:#060d17;border:1px solid #24506b;border-radius:9px;
+  padding:12px 14px;margin-bottom:12px;text-align:center}
+#scnet .snShareLbl{font-size:10.5px;letter-spacing:.18em;text-transform:uppercase;opacity:.55;margin-bottom:6px}
+#scnet .snCodeVal{font:600 34px/1.1 ui-monospace,Menlo,Consolas,monospace;letter-spacing:.34em;
+  color:#7fe3ff;text-shadow:0 0 18px rgba(63,180,255,.35);padding:2px 0 2px 12px;
+  user-select:all;-webkit-user-select:all;cursor:text}
+#scnet .snShare .snRow{justify-content:center;margin:10px 0 0}
+#scnet .snCopied{color:#7ee38b;font-size:12px;letter-spacing:.06em}
+#scnet .snLink{margin-top:9px;font:11.5px/1.4 ui-monospace,Menlo,Consolas,monospace;
+  color:#8fb4cf;word-break:break-all;user-select:all;-webkit-user-select:all;opacity:.8}
+#scnet .snWarn2{margin-top:7px;font-size:12px;color:#ffce6b;line-height:1.45}
+@media(max-width:560px){#scnet .snCodeVal{font-size:27px;letter-spacing:.26em}}
+#scnetOpen{position:fixed;right:10px;bottom:10px;z-index:2147483690;
+  background:linear-gradient(#1d6f8c,#12455a);border:1px solid #3fa5c7;color:#eaffff;
+  padding:8px 14px;border-radius:8px;font:12px/1 ui-sans-serif,system-ui,sans-serif;
+  letter-spacing:.12em;cursor:pointer;display:none}
+#scnetOpen.on{display:block}
+#scnetHud{position:fixed;left:8px;top:8px;z-index:2147483680;display:none;
+  font:11px/1.35 ui-monospace,Menlo,Consolas,monospace;color:#9fe6ff;
+  background:rgba(4,10,18,.62);border:1px solid #1d3a4d;border-radius:6px;padding:5px 8px;white-space:pre}
+#scnetHud.on{display:block}
+@media(max-width:560px){#scnet .snWrap{padding:14px 11px 34px}}
+`;
+
+  const HTML = `
+<button class="snX" data-a="close">&times;</button>
+<div class="snWrap">
+  <h3>Online · Signal Clash</h3>
+
+  <div class="snCard">
+    <div class="snRow">
+      <label>Name <input id="scnName" size="10" maxlength="12" value="PLAYER"></label>
+      <label>You play <select id="scnChar"></select></label>
+    </div>
+    <div class="snRow" id="scnHostOnly">
+      <label>Arena <select id="scnStage"></select></label>
+      <span class="snTag" title="Only the player who creates the lobby picks the arena">host picks</span>
+    </div>
+  </div>
+
+  <h4>Find a match</h4>
+  <div class="snCard">
+    <div class="snRow">
+      <button class="snGo" data-a="quick">Quick Match</button>
+      <button data-a="create">Create public</button>
+      <button data-a="createP">Create private</button>
+    </div>
+    <div class="snRow">
+      <input id="scnCode" maxlength="5" placeholder="CODE">
+      <button data-a="join">Join by code</button>
+      <button data-a="refresh">Refresh list</button>
+    </div>
+    <div class="snMsg" id="scnMsg"></div>
+  </div>
+
+  <h4>Open lobbies</h4>
+  <div class="snCard"><table id="scnList"><thead><tr>
+    <th>code</th><th>host</th><th>input</th><th>players</th><th></th></tr></thead><tbody></tbody></table></div>
+
+  <div id="scnLobby" style="display:none">
+    <h4>Your lobby</h4>
+    <div class="snShare" id="scnShare">
+      <div class="snShareLbl" id="scnShareLbl">Share this code</div>
+      <div class="snCodeVal" id="scnCodeBig">-----</div>
+      <div class="snRow">
+        <button data-a="copy">Copy code</button>
+        <button data-a="copylink">Copy invite link</button>
+        <span class="snCopied" id="scnCopied"></span>
+      </div>
+      <div class="snLink" id="scnLinkPreview"></div>
+      <div class="snWarn2" id="scnLinkWarn"></div>
+    </div>
+    <div class="snCard">
+      <table id="scnPlayers"><thead><tr>
+        <th>player</th><th>input</th><th>ready</th><th>role</th><th>link</th></tr></thead><tbody></tbody></table>
+      <div class="snRow" style="margin-top:10px">
+        <button class="snGo" data-a="ready">Ready</button>
+        <button class="snGo" id="scnStart" data-a="start">Start match</button>
+        <button class="snWarn" data-a="leave">Leave</button>
+      </div>
+      <div class="snMsg" id="scnLobbyMsg"></div>
+    </div>
+  </div>
+</div>`;
+
+  const NetUI = {
+    net: null, built: false, myChar: 0, guestChar: 1, ready: false,
+
+    build() {
+      if (this.built) return; this.built = true;
+      const st = document.createElement('style'); st.textContent = CSS;
+      document.head.appendChild(st);
+
+      const p = document.createElement('div'); p.id = 'scnet'; p.innerHTML = HTML;
+      document.body.appendChild(p); this.el = p;
+
+      const ob = document.createElement('button'); ob.id = 'scnetOpen';
+      ob.textContent = 'ONLINE'; ob.onclick = () => this.open();
+      document.body.appendChild(ob); this.openBtn = ob;
+
+      const hud = document.createElement('div'); hud.id = 'scnetHud';
+      document.body.appendChild(hud); this.hud = hud;
+
+      const chars = ROSTER.map((r, i) => `<option value="${i}">${r.name}</option>`).join('');
+      p.querySelector('#scnChar').innerHTML = chars;
+      p.querySelector('#scnStage').innerHTML =
+        STAGE_DEFS.map((s, i) => `<option value="${i}">${s.name}</option>`).join('');
+
+      try {
+        const n = localStorage.getItem('scnet.name');
+        if (n) p.querySelector('#scnName').value = n;
+      } catch (e) { }
+
+      p.addEventListener('click', e => {
+        const b = e.target.closest('[data-a]'); if (!b) return;
+        const a = b.dataset.a;
+        if (a === 'close') this.close();
+        else if (a === 'quick') this.quick();
+        else if (a === 'create') this.create('public');
+        else if (a === 'createP') this.create('private');
+        else if (a === 'join') this.join(p.querySelector('#scnCode').value);
+        else if (a === 'refresh') this.refresh();
+        else if (a === 'ready') this.toggleReady();
+        else if (a === 'start') this.start();
+        else if (a === 'leave') this.leave();
+        else if (a === 'copy') this.copy(this.codeNow(), 'Code copied');
+        else if (a === 'copylink') this.copy(this.inviteLink(), 'Invite link copied');
+      });
+
+      p.querySelector('#scnChar').onchange = () => {
+        this.myChar = +p.querySelector('#scnChar').value;
+        /* the guest's pick has to reach the host, who composes the match */
+        if (this.net && !this.isHost()) this.net.broadcast({ t: 'pick', c: this.myChar });
+      };
+
+      /* a title-screen entry point, plus the floating button as a fallback */
+      const menu = document.querySelector('#sc-title .menu');
+      if (menu) {
+        const b = document.createElement('div');
+        b.className = 'btn wide'; b.textContent = 'Online Match';
+        b.onclick = () => this.open();
+        menu.appendChild(b);
+      } else ob.classList.add('on');
+
+      SCNet.onDesync = (f) => this.say('#scnLobbyMsg', 'Desync detected at frame ' + f + ' — the match is no longer trustworthy.', 'snBad');
+      SCNet.onEnd = () => { this.hud.classList.remove('on'); };
+
+      try {
+        const invite = this.inviteFromUrl();
+        if (invite) {
+          setTimeout(() => { this.open(); this.joinFromLink(invite); }, 350);
+        } else {
+          const q = new URLSearchParams(location.search);
+          if (q.get('online') === '1' || /(^|[?&#])online=1/.test(location.hash)) {
+            setTimeout(() => this.open(), 300);
+          }
+        }
+      } catch (e) { console.error('[scnet] invite parse', e); }
+
+      setInterval(() => this.tickHud(), 250);
+    },
+
+    /* `?j=`, `?join=`, `#j=` and `#join=` are all honoured: whichever survives
+       whatever mangled the link on its way to the player */
+    inviteFromUrl() {
+      const grab = str => {
+        if (!str) return '';
+        const m = String(str).match(/[?&#]?(?:j|join)=([A-Za-z0-9]{5})(?:[&#]|$)/);
+        return m ? m[1].toUpperCase() : '';
+      };
+      return grab(location.search) || grab(location.hash);
+    },
+
+    /* arriving from a link must SAY something - silence looks like a dead link */
+    async joinFromLink(code) {
+      this.say('#scnMsg', 'Opening invite ' + code + '…');
+      try {
+        await this.join(code);
+        if (this.net && this.net.me) this.say('#scnMsg', 'Joined ' + code + '.');
+      } catch (e) { /* join() already reported it */ }
+    },
+
+    open() { this.build(); this.el.classList.add('on'); this.refresh(); },
+    close() { this.el.classList.remove('on'); },
+    say(sel, t, cls) {
+      const n = this.el.querySelector(sel); if (!n) return;
+      n.textContent = t || ''; n.className = 'snMsg' + (cls ? ' ' + cls : '');
+    },
+    isHost() {
+      return !!(this.net && this.net.isAuthority());
+    },
+
+    codeNow() { return (this.net && this.net.code) || ''; },
+
+    embedded() { try { return window.top !== window.self; } catch (e) { return true; } },
+
+    /* A link that drops the other player straight into this lobby.
+       Deliberately ONE short parameter (`j`) rather than two: chat apps and
+       SMS clients routinely truncate a URL at the first `&`, and a link that
+       loses `join=` looks to the player exactly like a broken link. The code
+       is also mirrored into the hash, because some static hosts rewrite or
+       drop query strings. Both forms are accepted on arrival. */
+    inviteLink() {
+      const c = this.codeNow();
+      if (!c) return '';
+      let base = location.href;
+      const u = new URL(base);
+      u.searchParams.delete('online'); u.searchParams.delete('join');
+      u.searchParams.set('j', c);
+      u.hash = 'j=' + c;
+      return u.toString();
+    },
+
+    /* why a link might not be shareable, in the player's words */
+    linkProblem() {
+      if (location.protocol === 'file:')
+        return 'This game is open from a file on your device, so the link only works on this machine. Share the CODE instead.';
+      if (/^(localhost|127\.|0\.0\.0\.0|192\.168\.|10\.)/.test(location.hostname))
+        return 'This is a local address, so the link only works on your own network. Share the CODE instead.';
+      if (this.embedded())
+        return 'The game is running inside an embed, so this link opens it directly rather than the page it is embedded on. The CODE always works.';
+      return '';
+    },
+
+    /* navigator.clipboard needs a secure context; itch.io embeds and plain
+       http:// pages do not have one, so fall back to a hidden textarea */
+    copy(text, okMsg) {
+      if (!text) return;
+      const done = () => {
+        const n = this.el.querySelector('#scnCopied');
+        n.textContent = okMsg;
+        clearTimeout(this._copyT);
+        this._copyT = setTimeout(() => { n.textContent = ''; }, 2200);
+      };
+      const fallback = () => {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          ta.style.cssText = 'position:fixed;opacity:0;left:-9999px';
+          document.body.appendChild(ta);
+          ta.select(); ta.setSelectionRange(0, text.length);
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+          done();
+        } catch (e) {
+          const n = this.el.querySelector('#scnCopied');
+          n.textContent = 'Copy failed — select it by hand';
+        }
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, fallback);
+      } else fallback();
+    },
+
+    mk() {
+      const name = this.el.querySelector('#scnName').value.trim() || 'PLAYER';
+      try { localStorage.setItem('scnet.name', name); } catch (e) { }
+      this.myChar = +this.el.querySelector('#scnChar').value;
+      if (this.net) { try { this.net.leave(); } catch (e) { } }
+
+      const net = EonNet.create({
+        url: serverUrl(), game: 'signal-clash', build: NET_BUILD,
+        name: name, input: matchMedia('(pointer:coarse)').matches ? 'touch' : 'pointer'
+      });
+      net.on('lobby', l => this.renderLobby(l));
+      net.on('begin', m => this.begin(m));
+      net.on('peerGone', m => {
+        if (SCNet.active) {
+          this.say('#scnLobbyMsg', 'Opponent disconnected.', 'snBad');
+          SCNet.quit(); UI.show('title'); this.open();
+        }
+      });
+      net.on('data', (d, from) => {
+        if (!d) return;
+        if (d.t === 'i' || d.t === 'c') SCNet.onData(d);
+        else if (d.t === 'pick') {
+          const c = d.c | 0;
+          this.guestChar = (c >= 0 && c < ROSTER.length) ? c : 0;   // peer-supplied
+          this.renderLobby(this.net.lobby);
+        }
+        else if (d.t === 'hello') { if (!this.isHost()) this.net.sendTo(from, { t: 'pick', c: this.myChar }); }
+      });
+      net.on('peer', p => {
+        this.renderLobby(this.net.lobby);
+        if (this.isHost()) this.net.sendTo(p.id, { t: 'hello' });
+        else this.net.sendTo(p.id, { t: 'pick', c: this.myChar });
+      });
+      net.on('error', e => this.say('#scnMsg', 'Error: ' + (e.code || 'unknown'), 'bad'));
+      this.net = net;
+      return net;
+    },
+
+    async refresh() {
+      this.build();
+      const net = this.net || this.mk();
+      try {
+        const rows = await net.list({ mode: '1v1', anyInput: true });
+        const tb = this.el.querySelector('#scnList tbody'); tb.innerHTML = '';
+        if (!rows.length) tb.innerHTML = '<tr><td colspan="5" style="opacity:.45">no open lobbies — create one</td></tr>';
+        rows.forEach(r => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td><code>${r.code}</code></td><td>${r.name || '—'}</td>
+            <td>${r.inputClass}</td><td>${r.players}/${r.maxPlayers}</td>
+            <td><button data-j="${r.code}">join</button></td>`;
+          tb.appendChild(tr);
+        });
+        tb.querySelectorAll('[data-j]').forEach(b => b.onclick = () => this.join(b.dataset.j));
+        /* only clear OUR OWN previous error: an invite or a join may have put
+           something important here while the list request was in flight */
+        const cur = this.el.querySelector('#scnMsg').textContent || '';
+        if (/^Cannot reach/.test(cur)) this.say('#scnMsg', '');
+      } catch (e) {
+        this.say('#scnMsg', 'Cannot reach the match server. ' + e.message, 'snBad');
+      }
+    },
+
+    async create(vis) {
+      const net = this.mk();
+      this.say('#scnMsg', 'Creating…');
+      try {
+        const code = await net.createLobby({
+          mode: '1v1', visibility: vis,
+          name: this.el.querySelector('#scnName').value.trim() || 'PLAYER'
+        });
+        await net.join(code);
+        this.say('#scnMsg', 'Lobby ' + code + ' created — share the code below.');
+      } catch (e) { this.say('#scnMsg', 'Could not create: ' + e.message, 'snBad'); }
+    },
+
+    async join(code) {
+      code = String(code || '').trim().toUpperCase();
+      if (code.length !== 5) return this.say('#scnMsg', 'A code is 5 characters.', 'snHot');
+      const net = this.mk();
+      this.say('#scnMsg', 'Joining ' + code + '…');
+      try { await net.join(code); this.say('#scnMsg', ''); }
+      catch (e) {
+        const why = {
+          lobby_full: 'That lobby is full.',
+          build_mismatch: 'That player is on a different version of the game — both of you refresh the page.',
+          no_lobby: 'No lobby with that code. It may have expired — ask for a fresh one.',
+          in_progress: 'That match has already started.',
+          join_timeout: 'The match server did not answer. Check the connection and try again.',
+          bad_server_response: 'The match server address looks wrong.'
+        }[e.message];
+        this.say('#scnMsg', why || ('Could not join: ' + e.message), 'snBad');
+        throw e;
+      }
+    },
+
+    async quick() {
+      const net = this.mk();
+      this.say('#scnMsg', 'Looking for a match…');
+      try {
+        const r = await net.quick({ mode: '1v1' });
+        this.say('#scnMsg', r.joined ? 'Found an opponent.'
+          : 'No one waiting — made lobby ' + r.code + '. Share the code below.');
+      } catch (e) { this.say('#scnMsg', 'Quick match failed: ' + e.message, 'snBad'); }
+    },
+
+    toggleReady() { this.ready = !this.ready; if (this.net) this.net.ready(this.ready); },
+    leave() { if (this.net) { this.net.leave(); this.net = null; } this.el.querySelector('#scnLobby').style.display = 'none'; this.refresh(); },
+
+    renderLobby(l) {
+      if (!l) return;
+      const box = this.el.querySelector('#scnLobby');
+      box.style.display = '';
+      this.el.querySelector('#scnCodeBig').textContent = l.code;
+      const full = l.players.length >= l.maxPlayers;
+      this.el.querySelector('#scnShareLbl').textContent =
+        full ? 'Lobby code' : 'Share this code';
+      this.el.querySelector('#scnShare').style.opacity = full ? '.72' : '1';
+      const link = this.inviteLink(), prob = this.linkProblem();
+      this.el.querySelector('#scnLinkPreview').textContent = link;
+      this.el.querySelector('#scnLinkWarn').textContent = prob;
+      const lb = this.el.querySelector('[data-a=copylink]');
+      if (lb) lb.textContent = prob ? 'Copy link anyway' : 'Copy invite link';
+      const tb = this.el.querySelector('#scnPlayers tbody'); tb.innerHTML = '';
+      l.players.forEach(p => {
+        const tr = document.createElement('tr');
+        const link = p.id === this.net.me ? 'you' : this.net.transportOf(p.id);
+        tr.innerHTML = `<td>${p.name}</td><td>${p.input}</td>
+          <td>${p.ready ? '<span class="snTag snOk">ready</span>' : '<span class="snTag">not ready</span>'}</td>
+          <td>${p.authority ? '<span class="snTag snOk">host</span>' : 'guest'}</td>
+          <td>${link}</td>`;
+        tb.appendChild(tr);
+      });
+      const host = this.isHost();
+      this.el.querySelector('#scnHostOnly').style.display = host ? '' : 'none';
+      const both = l.players.length === 2 && l.players.every(p => p.ready && p.connected);
+      const btn = this.el.querySelector('#scnStart');
+      btn.style.display = host ? '' : 'none';
+      btn.disabled = !both;
+      if (l.players.length < 2) this.say('#scnLobbyMsg', 'Waiting for an opponent to join…');
+      else if (!both) this.say('#scnLobbyMsg', 'Both players must press Ready.');
+      else this.say('#scnLobbyMsg', host ? 'Ready — press Start match.' : 'Waiting for the host to start.');
+    },
+
+    start() {
+      if (!this.isHost()) return;
+      const setup = {
+        p1: this.myChar,
+        p2: this.guestChar,
+        stage: +this.el.querySelector('#scnStage').value,
+        autoGuard: (Store.data.autoGuard || 'on') !== 'off',
+        /* physics dimensions are fixed for the match on BOTH machines,
+           whatever shape either window happens to be */
+        ground: VIEWS.landscape.GROUND,
+        arena: VIEWS.landscape.ARENA
+      };
+      this.net.start(setup);
+    },
+
+    begin(m) {
+      try { this._begin(m); }
+      catch (e) {
+        this.open();
+        this.say('#scnLobbyMsg', 'Could not start the match: ' + e.message, 'snBad');
+      }
+    },
+
+    _begin(m) {
+      const l = this.net.lobby;
+      const idx = l.players.findIndex(p => p.id === this.net.me);
+      const other = l.players.find(p => p.id !== this.net.me);
+      if (!other) return;
+      this.close();
+      SCNet.startMatch(m.setup, m.seed, idx === 0 ? 0 : 1, other.id, this.net);
+      this.hud.classList.add('on');
+    },
+
+    tickHud() {
+      if (!this.built) return;
+      this.openBtn.classList.toggle('on', !Game.running && !this.el.classList.contains('on') &&
+        !document.querySelector('#sc-title .menu'));
+      if (!SCNet.active) { this.hud.classList.remove('on'); return; }
+      const s = SCNet.stats();
+      this.hud.textContent =
+        'f' + s.frame + '  ahead ' + s.ahead +
+        '\nrb ' + s.rollbacks + ' (avg ' + s.avgRb + ', max ' + s.maxRb + ')' +
+        '\nstall ' + s.stalls + '  desync ' + s.desyncs;
+    }
+  };
+
+  window.SCNetUI = NetUI;
+  if (document.readyState === 'complete' || document.readyState === 'interactive') {
+    setTimeout(() => { try { NetUI.build(); } catch (e) { console.error('[scnet]', e); } }, 900);
+  } else {
+    window.addEventListener('load', () => setTimeout(() => { try { NetUI.build(); } catch (e) { console.error('[scnet]', e); } }, 900));
+  }
+})();
+
+</script>
+<!-- END EONNET ONLINE 1v1 -->
 </body>
 </html>
